@@ -1,0 +1,129 @@
+--- versions/b2_integrated/order_ledger.py	2026-11-25 18:36:52.795698820 +0000
++++ versions/buy_v1/order_ledger.py	2026-11-25 18:36:52.805698845 +0000
+@@ -44,6 +44,10 @@
+     "avg_exec_price", "reason", "source", "error", "created_at_utc", "updated_at_utc",
+     # ЭТАП 5Б: добавлены В КОНЕЦ — старые записи читаются без ошибок.
+     "exchange_order_id", "order_request_id",
++    # BUY ACCOUNTING AUDIT (v1, FIX-2): фактическая комиссия BUY-исполнения
++    # persists в реестре; добавлена В КОНЕЦ — обратная совместимость
++    # со старыми журналами (у старых записей поле None).
++    "commission",
+ ]
+ IDENTITY_FIELDS = ("order_id", "trade_id", "figi", "side", "requested_lots")
+ 
+@@ -165,7 +169,7 @@
+         prev = self._latest.get(oid) if oid is not None else None
+         now = utc_now_iso()
+         record = {"record_type": "ORDER_STATUS", "timestamp_utc": now, "status": str(status), "order_id": oid}
+-        for key in ("trade_id", "figi", "ticker", "side", "requested_lots", "executed_lots", "lots_left", "avg_exec_price", "reason", "source", "error"):
++        for key in ("trade_id", "figi", "ticker", "side", "requested_lots", "executed_lots", "lots_left", "avg_exec_price", "commission", "reason", "source", "error"):
+             value = fields.get(key)
+             if value is None and prev is not None and key in ("trade_id", "figi", "ticker", "side", "requested_lots"):
+                 value = prev.get(key)
+@@ -196,6 +200,55 @@
+                 record["executed_lots"] = prev.get("executed_lots") or 0
+         record["created_at_utc"] = (prev or {}).get("created_at_utc") or now
+         record["updated_at_utc"] = now
++        # === BUY ACCOUNTING AUDIT (v1, FIX-1) ===
++        # Повторный отчёт ТОЙ ЖЕ заявки (тот же order_id) не может молча:
++        #   * перезаписать идентичность заявки (FIGI/сторона) — смешение
++        #     двух заявок одного order_id запрещено;
++        #   * затереть ранее подтверждённую цену исполнения/комиссию
++        #     ОТСУТСТВИЕМ данных в новом отчёте (обогащение, не потеря).
++        # Противоречивая цена/комиссия — конфликт ТОЛЬКО для повторного
++        # отчёта УЖЕ ТЕРМИНАЛЬНОЙ заявки (исполнение заморожено, значения
++        # меняться не могут; семантика B2 apply_close_execution). Между
++        # нетерминальными отчётами средняя цена/комиссия кумулятивного
++        # исполнения ЛЕГИТИМНО уточняются (частичные исполнения по разным
++        # ценам) — обновление принимается. Конфликт -> UNCERTAIN с
++        # СОХРАНЕНИЕМ прежней идентичности/значений (подлинное состояние
++        # не теряется, противоречие остаётся видимым).
++        if prev is not None:
++            _meta_conflicts = []
++            for _k in ("figi", "side"):
++                _new = fields.get(_k)
++                _old = prev.get(_k)
++                if (_new is not None and _old is not None
++                        and str(_new) != str(_old)):
++                    _meta_conflicts.append(f"{_k} {_old}->{_new}")
++                    record[_k] = _old
++            _prev_terminal = prev.get("status") in TERMINAL_STATUSES
++            for _k in ("avg_exec_price", "commission"):
++                _new = fields.get(_k)
++                _old = prev.get(_k)
++                if _new is None:
++                    # отсутствие данных в повторном отчёте НЕ затирает
++                    # ранее подтверждённое значение
++                    if _old is not None:
++                        record[_k] = _old
++                    continue
++                if _old is None or not _prev_terminal:
++                    continue
++                try:
++                    _fo, _fn = float(_old), float(_new)
++                except (TypeError, ValueError):
++                    _meta_conflicts.append(f"{_k} {_old}->{_new}")
++                    record[_k] = _old
++                    continue
++                if abs(_fo - _fn) > 1e-9:
++                    _meta_conflicts.append(f"{_k} {_old}->{_new}")
++                    record[_k] = _old
++            if _meta_conflicts:
++                record["status"] = STATUS_UNCERTAIN
++                record["reason"] = (str(fields.get("reason") or "") +
++                    "; identity/metadata contradiction of repeat report: " +
++                    ", ".join(_meta_conflicts)).strip("; ")
+         if not self._append_raw(record):
+             return False
+         if oid is not None:
+@@ -228,7 +281,8 @@
+                     executed_lots: int = None, avg_exec_price: float = None,
+                     status_hint: str = None, reason: str = "", source: str = "post_response",
+                     error: str = None,
+-                    exchange_order_id: str = None, order_request_id: str = None) -> bool:
++                    exchange_order_id: str = None, order_request_id: str = None,
++                    commission: float = None) -> bool:
+         status = STATUS_SENT if status_hint is None else status_hint
+         if status == STATUS_FILL:
+             try:
+@@ -243,28 +297,35 @@
+                            side=side, requested_lots=requested_lots, executed_lots=executed_lots,
+                            avg_exec_price=avg_exec_price, reason=reason, source=source, error=error,
+                            exchange_order_id=exchange_order_id,
+-                           order_request_id=order_request_id)
++                           order_request_id=order_request_id,
++                           commission=commission)
+ 
+     def record_status(self, order_id: str, status: str, *, trade_id: str = None,
+                       figi: str = None, ticker: str = None, side: str = None,
+                       requested_lots: int = None, executed_lots: int = None,
+                       lots_left: int = None, avg_exec_price: float = None,
+                       reason: str = "", source: str = "", error: str = None,
+-                      exchange_order_id: str = None, order_request_id: str = None) -> bool:
++                      exchange_order_id: str = None, order_request_id: str = None,
++                      commission: float = None) -> bool:
++        # BUY ACCOUNTING AUDIT (v1, FIX-2): commission — фактическая комиссия
++        # исполнения (persist в реестре; наследование/конфликт — в append).
+         return self.append(status, order_id, trade_id=trade_id, figi=figi, ticker=ticker,
+             side=side, requested_lots=requested_lots, executed_lots=executed_lots,
+             lots_left=lots_left, avg_exec_price=avg_exec_price, reason=reason, source=source, error=error,
+-            exchange_order_id=exchange_order_id, order_request_id=order_request_id)
++            exchange_order_id=exchange_order_id, order_request_id=order_request_id,
++            commission=commission)
+ 
+     def record_uncertain(self, order_id: str, *, trade_id: str = None, figi: str = None,
+                          ticker: str = None, side: str = None, requested_lots: int = None,
+                          executed_lots: int = None, avg_exec_price: float = None,
+                          reason: str = "", source: str = "", error: str = None,
+-                         exchange_order_id: str = None, order_request_id: str = None) -> bool:
++                         exchange_order_id: str = None, order_request_id: str = None,
++                         commission: float = None) -> bool:
+         return self.append(STATUS_UNCERTAIN, order_id, trade_id=trade_id, figi=figi,
+             ticker=ticker, side=side, requested_lots=requested_lots, executed_lots=executed_lots,
+             avg_exec_price=avg_exec_price, reason=reason, source=source, error=error,
+-            exchange_order_id=exchange_order_id, order_request_id=order_request_id)
++            exchange_order_id=exchange_order_id, order_request_id=order_request_id,
++            commission=commission)
+ 
+     # ---- New exact per-order cumulative execution / apply protocol ----
+     def record_observation(self, order_id: str, *, executed_lots: int, status: str,

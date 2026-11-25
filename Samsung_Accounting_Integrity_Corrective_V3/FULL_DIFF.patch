@@ -1,0 +1,1209 @@
+# FULL_DIFF.patch — Samsung_Accounting_Integrity_Corrective_V3
+# Generated: 2026-11-25 19:05:51 UTC
+--- a/execution.py
++++ b/execution.py
+@@ -193,6 +193,7 @@
+ #   работает как прежде) и классифицирует причину SL-выхода: SL / BE / TRAIL.
+ import json
+ import logging
++import math
+ from dataclasses import dataclass, field, asdict
+ from enum import Enum
+ from typing import Dict, List, Optional
+@@ -1250,7 +1251,19 @@
+             if ep is None or lots_executed <= 0 or lot_size <= 0:
+                 return None
+             total = float(ep.units) + float(ep.nano) / 1e9
+-            return total / (lots_executed * lot_size)
++            price = total / (lots_executed * lot_size)
++            # CORRECTIVE AUDIT V3 (FIX-ZERO-PRICE, ТЗ §5.1/§5.4): цена
++            # исполнения обязана быть конечной и ПОЛОЖИТЕЛЬНОЙ. Нулевой
++            # расчёт (брокер возвращает executed_order_price=0 при
++            # lots_executed>0 — например, для отменённой заявки) — это
++            # ОТСУТСТВИЕ цены, а не подтверждённая стоимость: возвращаем
++            # None, чтобы реестр/позиция не закрепляли 0.0 как достоверную
++            # цену и поздняя реальная цена могла обогатить запись без
++            # ложного конфликта реестра (дефект «0.0 -> реальная цена ->
++            # UNCERTAIN», воспроизведён трассировкой в V3).
++            if not math.isfinite(price) or price <= 0:
++                return None
++            return price
+         except Exception:
+             return None
+ 
+@@ -1260,11 +1273,16 @@
+         # значение брокера («комиссия реально нулевая»), оно отличается от
+         # отсутствующего значения (None). Прежнее поведение (0 -> None)
+         # теряло факт нулевой комиссии и подменяло её модельной.
++        # CORRECTIVE AUDIT V3 (ТЗ §5.4): NaN/±Inf — невалидные данные,
++        # в реестр/State/CSV не попадают: трактуются как отсутствие
++        # подтверждённого значения (None).
+         try:
+             ec = getattr(state, "executed_commission", None)
+             if ec is None:
+                 return None
+             value = abs(float(ec.units) + float(ec.nano) / 1e9)
++            if not math.isfinite(value):
++                return None
+             return value
+         except Exception:
+             return None
+--- a/main.py
++++ b/main.py
+@@ -549,6 +549,7 @@
+ import csv
+ import json
+ import logging
++import math
+ import os
+ import uuid
+ from datetime import datetime, timezone
+@@ -3365,6 +3366,16 @@
+         price_value = float(exec_price) if exec_price is not None else None
+     except (TypeError, ValueError):
+         return False
++    # CORRECTIVE AUDIT V3 (ТЗ §5.4, NaN/Infinity): float() успешно парсит
++    # NaN и ±Infinity, поэтому конечность проверяется ЯВНО. Невалидное
++    # значение делает операцию ЦЕЛИКОМ неудачной (та же семантика, что
++    # и непарсируемое значение в FIX-1): объект позиции не изменяется,
++    # частичная мутация невозможна, невалидные данные не попадают
++    # в State, Ledger или CSV.
++    if commission_value is not None and not math.isfinite(commission_value):
++        return False
++    if price_value is not None and not math.isfinite(price_value):
++        return False
+ 
+     # --- 2. ПОДГОТОВКА новых значений (без изменения объекта позиции) ---
+     staged = {}
+--- a/order_ledger.py
++++ b/order_ledger.py
+@@ -20,6 +20,7 @@
+ import hashlib
+ import json
+ import logging
++import math
+ import os
+ from datetime import datetime, timezone
+ from typing import Dict, List, Optional
+@@ -38,6 +39,37 @@
+ NON_TERMINAL_STATUSES = {STATUS_INTENT, STATUS_SENT, STATUS_NEW, STATUS_PARTIALLYFILL, STATUS_UNCERTAIN}
+ DEAD_WITHOUT_EXECUTION = {STATUS_REJECTED, STATUS_CANCELLED, STATUS_EXPIRED}
+ 
++# === CORRECTIVE AUDIT V3 (FIX-ZERO-PRICE) ===
++# Валидность «подтверждённого» значения зависит от типа поля:
++#   * avg_exec_price — валидно ТОЛЬКО конечное ПОЛОЖИТЕЛЬНОЕ значение.
++#     Нулевая/отрицательная/неконечная величина НЕ является ценой
++#     исполнения: это отсутствие данных (брокер нередко возвращает
++#     executed_order_price=0 при lots_executed>0 для отменённых заявок).
++#     Записанное в реестре 0.0 не может блокировать позднее обогащение
++#     реальной ценой (ложный UNCERTAIN «0.0 -> реальная цена» — дефект,
++#     устранённый V3; ТЗ §5.1: «0.0 не должен ошибочно трактоваться как
++#     подтверждённая цена исполнения»).
++#   * commission — валидно любое КОНЕЧНОЕ неотрицательное значение:
++#     0.0 — ДОСТОВЕРНЫЙ реальный ноль брокера (семантика BUY AUDIT v1
++#     FIX-3 сохранена без изменений), NaN/Inf/отрицательное — невалидны.
++# Настоящие противоречия двух ДОСТОВЕРНЫХ значений (например,
++# 100.0 -> 200.0 на терминальной заявке) распознаются как прежде —
++# fail-closed защита НЕ ослабляется.
++def _valid_execution_price(value) -> bool:
++    try:
++        f = float(value)
++    except (TypeError, ValueError):
++        return False
++    return math.isfinite(f) and f > 0
++
++
++def _valid_commission(value) -> bool:
++    try:
++        f = float(value)
++    except (TypeError, ValueError):
++        return False
++    return math.isfinite(f) and f >= 0
++
+ RECORD_FIELDS = [
+     "timestamp_utc", "status", "order_id", "trade_id", "figi", "ticker",
+     "side", "requested_lots", "executed_lots", "lots_left",
+@@ -225,23 +257,36 @@
+                     record[_k] = _old
+             _prev_terminal = prev.get("status") in TERMINAL_STATUSES
+             for _k in ("avg_exec_price", "commission"):
++                # CORRECTIVE AUDIT V3 (FIX-ZERO-PRICE): конфликт распознаётся
++                # ТОЛЬКО между двумя ДОСТОВЕРНЫМИ значениями (валидность —
++                # по типу поля, см. _valid_execution_price/_valid_commission).
++                _valid = (_valid_execution_price if _k == "avg_exec_price"
++                          else _valid_commission)
+                 _new = fields.get(_k)
+                 _old = prev.get(_k)
+-                if _new is None:
+-                    # отсутствие данных в повторном отчёте НЕ затирает
+-                    # ранее подтверждённое значение
+-                    if _old is not None:
++                if _new is None or not _valid(_new):
++                    # отсутствие данных (или невалидное значение: 0.0-цена,
++                    # NaN/Inf) в повторном отчёте НЕ затирает ранее
++                    # подтверждённое значение и само не записывается
++                    if _old is not None and _valid(_old):
+                         record[_k] = _old
++                    else:
++                        record.pop(_k, None)
+                     continue
+-                if _old is None or not _prev_terminal:
+-                    continue
+-                try:
+-                    _fo, _fn = float(_old), float(_new)
+-                except (TypeError, ValueError):
+-                    _meta_conflicts.append(f"{_k} {_old}->{_new}")
+-                    record[_k] = _old
++                if _old is None or not _valid(_old) or not _prev_terminal:
++                    # новая достоверная цена/комиссия ОБОГАЩАЕТ запись:
++                    #   * прежних данных не было; ИЛИ
++                    #   * прежнее значение невалидно (например, legacy 0.0
++                    #     в avg_exec_price — «нулевая цена» не является
++                    #     подтверждённой ценой исполнения, обогащение
++                    #     реальной ценой — штатный сценарий ТЗ §5.1); ИЛИ
++                    #   * отчёт нетерминальный — кумулятивные средние
++                    #     легитимно уточняются (частичные исполнения).
+                     continue
+-                if abs(_fo - _fn) > 1e-9:
++                if abs(float(_old) - float(_new)) > 1e-9:
++                    # два достоверных РАЗЛИЧНЫХ значения на терминальной
++                    # заявке — настоящее противоречие: fail-closed,
++                    # прежнее значение сохраняется (защита не ослаблена)
+                     _meta_conflicts.append(f"{_k} {_old}->{_new}")
+                     record[_k] = _old
+             if _meta_conflicts:
+--- a/test_execution.py
++++ b/test_execution.py
+@@ -4,7 +4,15 @@
+ import types
+ from pathlib import Path
+ 
+-ROOT = Path(__file__).resolve().parent.parent
++# CORRECTIVE AUDIT V3 (ТЗ §5.15, тестовая инфраструктура): путь к
++# execution.py теперь определяется устойчиво. Прежний вариант
++# (ROOT = parent.parent) работал только для tests/-копии: при запуске
++# файла из КОРНЯ проекта parent.parent указывал НАД каталогом проекта
++# и сборка теста падала с FileNotFoundError до выполнения любых
++# утверждений. Файл разрешается от ближайшего каталога, где execution.py
++# реально лежит; утверждения тестов не меняются.
++_HERE = Path(__file__).resolve().parent
++ROOT = _HERE if (_HERE / "execution.py").is_file() else _HERE.parent
+ sys.modules.setdefault("config", types.ModuleType("config"))
+ spec = importlib.util.spec_from_file_location("execution_under_test", ROOT / "execution.py")
+ mod = importlib.util.module_from_spec(spec)
+--- /dev/null
++++ b/test_corrective_audit_v3.py
+@@ -0,0 +1,432 @@
++# test_corrective_audit_v3.py
++# Tsclp_v2.1_volatile_Samsung — CORRECTIVE AUDIT V3
++# (Samsung Accounting Integrity Audit & Corrective V3).
++#
++# РЕЖИМ: RESEARCH ONLY. NO LIVE ORDERS. NO SANDBOX ORDERS.
++# Все брокерские объекты — fake/stub, все файлы — во временных каталогах.
++# Реальные state.json / order_ledger.jsonl / research_trades.csv /
++# research_events.jsonl не затрагиваются (изоляция через monkeypatch/tmp_path).
++#
++# Покрываемые дефекты V3 (ТЗ §5.1, §5.3, §5.4, §5.5, §5.6, §5.8):
++#
++#   FIX-ZERO-PRICE (цена исполнения 0.0 против None, ТЗ §5.1):
++#     1  test_v3_price_extract_zero_reported_price_is_none
++#     2  test_v3_price_extract_negative_nonfinite_is_none
++#     3  test_v3_ledger_missing_price_then_real_price_enriched
++#     4  test_v3_ledger_legacy_zero_price_enriched_no_uncertain
++#     5  test_v3_ledger_real_price_contradiction_still_fail_closed
++#     6  test_v3_ledger_new_zero_price_does_not_overwrite_confirmed
++#     7  test_v3_ledger_p0_scenario_partial_cancel_late_lots_no_uncertain
++#     8  test_v3_ledger_repeat_terminal_report_idempotent
++#   SELL/B2 совместимость (ТЗ §5.3):
++#     9  test_v3_sell_zero_price_then_real_price_no_uncertain
++#     10 test_v3_sell_cursor_zero_price_not_stored_b2_semantics
++#   Нулевая комиссия (ТЗ §5.5 — 0.0 остаётся подтверждённым значением):
++#     11 test_v3_ledger_commission_zero_is_confirmed_contradiction_fail_closed
++#     12 test_v3_ledger_commission_none_keeps_old_zero
++#   NaN / Infinity (ТЗ §5.4):
++#     13 test_v3_enrich_inf_commission_rejected_no_mutation
++#     14 test_v3_enrich_nan_price_rejected_no_mutation
++#     15 test_v3_enrich_inf_price_rejected_no_mutation
++#     16 test_v3_enrich_nonfinite_does_not_break_next_valid_call
++#     17 test_v3_extract_commission_nonfinite_is_none_zero_kept
++#
++# Интеграционное воспроизведение дефекта §5.14 — корневой тест
++# test_p0_batch2_late_execution.py::test_integration_trading_cycle_
++# partial_cancel_recovery_open_late_lots (на baseline падал с
++# «UNCERTAIN вместо CANCELLED», после V3-исправлений проходит).
++#
++# Запуск из корня каталога кандидата:
++#   PYTHONPATH=. pytest test_corrective_audit_v3.py -v
++
++import os
++import sys
++
++import pytest
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++
++import main
++from execution import ExecutionMonitor, PositionState, TrackedPosition
++from order_ledger import OrderLedger, STATUS_CANCELLED, STATUS_UNCERTAIN
++
++# Проверенная инфраструктура предыдущих итераций (fake-брокер, отчёты).
++from test_b2_v4_accounting_consistency import (  # noqa: E402
++    FakeState,
++    _MV,
++)
++
++FIGI = "BBG00CORRECTV3"
++TICKER = "TESTV3"
++OID = "v3-oid-1"
++
++FILL, REJECTED, CANCELLED, NEW, PARTIALLYFILL, EXPIRED = 1, 2, 3, 4, 5, 6
++
++
++# ===========================================================================
++# Общая изоляция
++# ===========================================================================
++
++@pytest.fixture()
++def env_v3(tmp_path, monkeypatch):
++    """Изоляция всех файловых побочных эффектов во временный каталог."""
++    import logger as research_logger
++    monkeypatch.setattr(main, "STATE_FILE", str(tmp_path / "state.json"))
++    monkeypatch.setattr(main, "STATE_FILE_TMP", str(tmp_path / "state.json.tmp"))
++    monkeypatch.setattr(research_logger, "EVENTS_FILE",
++                        str(tmp_path / "research_events.jsonl"))
++    monkeypatch.setattr(research_logger, "TRADES_FILE",
++                        str(tmp_path / "research_trades.csv"))
++    monkeypatch.setattr(main, "_external_close_candidates", {})
++    monkeypatch.setattr(main, "reconcile_done", True)
++    monkeypatch.setattr(main, "state_save_failed", False)
++    monkeypatch.setattr(main, "ledger_ref", None)
++    yield tmp_path
++
++
++def make_ledger(tmp_path):
++    ledger = OrderLedger(str(tmp_path / "order_ledger.jsonl"))
++    ledger.load()
++    return ledger
++
++
++def make_intent(ledger, oid=OID, side="BUY", lots=10):
++    assert ledger.record_intent(oid, trade_id="t-v3", figi=FIGI,
++                                ticker=TICKER, side=side,
++                                requested_lots=lots)
++
++
++# ===========================================================================
++# FIX-ZERO-PRICE: _extract_price (ТЗ §5.1 — источник дефекта)
++# ===========================================================================
++
++def test_v3_price_extract_zero_reported_price_is_none():
++    """Нулевая сообщённая цена (executed_order_price=0 при lots_executed>0)
++    — это ОТСУТСТВИЕ цены (None), а не подтверждённая стоимость 0.0.
++    Прежнее поведение возвращало 0.0: реестр закреплял «подтверждённую
++    нулевую цену», и поздняя реальная цена вызывала ложный UNCERTAIN
++    (воспроизведено трассировкой V3 на baseline)."""
++    st = FakeState(status_code=CANCELLED, lots_executed=2, price_units=0.0)
++    assert ExecutionMonitor._extract_price(st, 2, 1) is None
++    # присутствующая реальная цена по-прежнему извлекается
++    st2 = FakeState(status_code=CANCELLED, lots_executed=2, price_units=200.0)
++    assert ExecutionMonitor._extract_price(st2, 2, 1) == pytest.approx(100.0)
++
++
++def test_v3_price_extract_negative_nonfinite_is_none():
++    """Отрицательная и неконечная расчётная цена — не цена исполнения."""
++    st = FakeState(status_code=CANCELLED, lots_executed=2, price_units=-100.0)
++    assert ExecutionMonitor._extract_price(st, 2, 1) is None
++    st2 = FakeState(status_code=CANCELLED, lots_executed=2, price_units=None)
++    st2.executed_order_price = _MV(float("inf"))
++    assert ExecutionMonitor._extract_price(st2, 2, 1) is None
++    st3 = FakeState(status_code=CANCELLED, lots_executed=2, price_units=None)
++    st3.executed_order_price = _MV(float("nan"))
++    assert ExecutionMonitor._extract_price(st3, 2, 1) is None
++
++
++# ===========================================================================
++# FIX-ZERO-PRICE: metadata-guard реестра (ТЗ §5.1, §5.8)
++# ===========================================================================
++
++def test_v3_ledger_missing_price_then_real_price_enriched(env_v3):
++    """Отчёт без цены (avg=None) не закрепляет 0.0; поздний терминальный
++    отчёт с реальной ценой обогащает запись — статус остаётся CANCELLED,
++    ложного UNCERTAIN нет (ТЗ §5.1: «поздняя реальная цена должна
++    обогащать существующую запись»)."""
++    ledger = make_ledger(env_v3)
++    make_intent(ledger, lots=10)
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=2,
++                                avg_exec_price=None) is True
++    rec1 = ledger.latest(OID)
++    assert rec1["status"] == STATUS_CANCELLED
++    assert rec1.get("avg_exec_price") is None
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=2,
++                                avg_exec_price=100.0) is True
++    rec2 = ledger.latest(OID)
++    assert rec2["status"] == STATUS_CANCELLED, (
++        "поздняя реальная цена не должна вызывать UNCERTAIN")
++    assert rec2["avg_exec_price"] == pytest.approx(100.0)
++
++
++def test_v3_ledger_legacy_zero_price_enriched_no_uncertain(env_v3):
++    """Legacy-запись с avg_exec_price=0.0 (записанная прежней версией кода)
++    НЕ является подтверждённой ценой: поздняя реальная цена обогащает
++    запись без ложного конфликта. Защита от настоящих противоречий
++    (два РАЗНЫХ достоверных значения) не ослабляется — см. тест 5."""
++    ledger = make_ledger(env_v3)
++    make_intent(ledger, lots=10)
++    # имитация legacy-записи прежней версии (0.0 записан как «цена»)
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=2,
++                                avg_exec_price=0.0) is True
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=100.0) is True
++    rec = ledger.latest(OID)
++    assert rec["status"] == STATUS_CANCELLED, (
++        "переход legacy 0.0 -> реальная цена не является противоречием")
++    assert rec["avg_exec_price"] == pytest.approx(100.0)
++    assert rec["executed_lots"] == 5
++
++
++def test_v3_ledger_real_price_contradiction_still_fail_closed(env_v3):
++    """Настоящее противоречие двух ДОСТОВЕРНЫХ цен на терминальной заявке
++    (100.0 -> 200.0) по-прежнему fail-closed: UNCERTAIN, прежнее значение
++    сохранено, блокировка действует. Защита реестра НЕ ослаблена."""
++    ledger = make_ledger(env_v3)
++    make_intent(ledger, lots=10)
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=100.0) is True
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=200.0) is True
++    rec = ledger.latest(OID)
++    assert rec["status"] == STATUS_UNCERTAIN
++    assert rec["avg_exec_price"] == pytest.approx(100.0), (
++        "при конфликте сохраняется прежнее достоверное значение")
++    assert ledger.figi_blocks_buy(FIGI)
++
++
++def test_v3_ledger_new_zero_price_does_not_overwrite_confirmed(env_v3):
++    """Повторный отчёт с нулевой ценой не затирает подтверждённую 100.0
++    и не является противоречием (0.0 — не цена, а отсутствие данных)."""
++    ledger = make_ledger(env_v3)
++    make_intent(ledger, lots=10)
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=100.0) is True
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=0.0) is True
++    rec = ledger.latest(OID)
++    assert rec["status"] == STATUS_CANCELLED
++    assert rec["avg_exec_price"] == pytest.approx(100.0)
++
++
++def test_v3_ledger_p0_scenario_partial_cancel_late_lots_no_uncertain(env_v3):
++    """Сценарий ТЗ §5.14 на уровне реестра: частичное исполнение 2 лота ->
++    CANCELLED без цены -> поздний рост до 5 лотов со средней ценой 100 ->
++    все 5 лотов учтены ровно один раз, статус CANCELLED (не UNCERTAIN),
++    повторный отчёт идемпотентен."""
++    ledger = make_ledger(env_v3)
++    make_intent(ledger, lots=5)
++    # частичное исполнение при отправке (цены нет)
++    assert ledger.record_status(OID, "PARTIALLYFILL", executed_lots=2,
++                                avg_exec_price=None) is True
++    # терминальный CANCELLED, цена отсутствует (брокер вернул 0)
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=2,
++                                avg_exec_price=None) is True
++    # поздний отчёт: cumulative 5 лотов, средняя цена 100
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=100.0) is True
++    rec = ledger.latest(OID)
++    assert rec["status"] == STATUS_CANCELLED
++    assert rec["executed_lots"] == 5
++    assert rec["avg_exec_price"] == pytest.approx(100.0)
++    # повторная сверка / повторный отчёт — дубликатов и смен статуса нет
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=100.0) is True
++    rec2 = ledger.latest(OID)
++    assert rec2["status"] == STATUS_CANCELLED
++    assert rec2["executed_lots"] == 5
++    assert rec2["avg_exec_price"] == pytest.approx(100.0)
++
++
++def test_v3_ledger_repeat_terminal_report_idempotent(env_v3):
++    """Повтор одинакового терминального отчёта (FILL) не меняет итоговый
++    учёт (ТЗ §5.6: идемпотентность повторного FILLED/CANCELLED)."""
++    ledger = make_ledger(env_v3)
++    make_intent(ledger, lots=5)
++    assert ledger.record_status(OID, "FILL", executed_lots=5,
++                                avg_exec_price=100.0,
++                                commission=1.5) is True
++    assert ledger.record_status(OID, "FILL", executed_lots=5,
++                                avg_exec_price=100.0,
++                                commission=1.5) is True
++    rec = ledger.latest(OID)
++    assert rec["status"] == "FILL"
++    assert rec["avg_exec_price"] == pytest.approx(100.0)
++    assert rec["commission"] == pytest.approx(1.5)
++
++
++# ===========================================================================
++# SELL/B2 совместимость (ТЗ §5.3)
++# ===========================================================================
++
++def test_v3_sell_zero_price_then_real_price_no_uncertain(env_v3):
++    """Зеркальный SELL-сценарий: legacy 0.0 в avg_exec_price SELL-записи
++    не вызывает ложный UNCERTAIN при поздней реальной цене."""
++    ledger = make_ledger(env_v3)
++    make_intent(ledger, side="SELL", lots=5)
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=2,
++                                avg_exec_price=0.0) is True
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=110.0) is True
++    rec = ledger.latest(OID)
++    assert rec["status"] == STATUS_CANCELLED
++    assert rec["avg_exec_price"] == pytest.approx(110.0)
++
++
++def test_v3_sell_cursor_zero_price_not_stored_b2_semantics():
++    """B2 apply_close_execution: нулевая цена НЕ сохраняется в per-order
++    cursor (семантика B2 не изменялась V3: цена > 0 — единственное
++    условие записи в курсор; отсутствие цены не подменяется нулём)."""
++    from execution import ExecutionMonitor as EM
++
++    class C:
++        async def get_sandbox_order_state(self, oid, order_id_type=None):
++            return None
++
++    m = EM(C())
++    p = m.register(
++        figi="FIGISELL", ticker="SELLT", direction="BUY", entry_price=100.0,
++        quantity=10, sl_price=95.0, tp_price=110.0, lot_size=1,
++        trade_id="T1", entry_order_id="BUY1", entry_requested_lots=10,
++        entry_applied_lots=10, executed_lots=10,
++    )
++    m.add_close_order(p, "SELL1", 10)
++    p.close_order_id = "SELL1"
++    p.close_requested_lots = 10
++    p.state = PositionState.CLOSING
++    # терминальный отчёт SELL с нулевой ценой: лоты применяются,
++    # цена в cursor НЕ попадает (0.0 не является ценой)
++    assert m.apply_close_execution(p, "SELL1", 10, "FILL",
++                                   execution_price=0.0,
++                                   commission=None, requested_lots=10) is True
++    cur = p.close_orders["SELL1"]
++    assert cur["avg_exec_price"] in (None,) or cur["avg_exec_price"] > 0, (
++        "B2 cursor не должен хранить 0.0 как подтверждённую цену")
++    assert p.quantity == 0
++
++
++# ===========================================================================
++# Нулевая комиссия (ТЗ §5.5 — 0.0 остаётся подтверждённым значением)
++# ===========================================================================
++
++def test_v3_ledger_commission_zero_is_confirmed_contradiction_fail_closed(env_v3):
++    """0.0-комиссия — ДОСТОВЕРНОЕ значение: конфликт 0.0 -> 5.0 на
++    терминальной заявке остаётся fail-closed (семантика BUY AUDIT v1
++    FIX-3 не ослаблена V3)."""
++    ledger = make_ledger(env_v3)
++    make_intent(ledger, lots=5)
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=100.0, commission=0.0) is True
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=100.0, commission=5.0) is True
++    rec = ledger.latest(OID)
++    assert rec["status"] == STATUS_UNCERTAIN
++    assert rec["commission"] == pytest.approx(0.0), (
++        "при конфликте сохраняется прежнее достоверное значение (0.0)")
++
++
++def test_v3_ledger_commission_none_keeps_old_zero(env_v3):
++    """Отсутствие комиссии в повторном отчёте не затирает подтверждённый
++    ноль 0.0 и не создаёт конфликт."""
++    ledger = make_ledger(env_v3)
++    make_intent(ledger, lots=5)
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=100.0, commission=0.0) is True
++    assert ledger.record_status(OID, STATUS_CANCELLED, executed_lots=5,
++                                avg_exec_price=100.0, commission=None) is True
++    rec = ledger.latest(OID)
++    assert rec["status"] == STATUS_CANCELLED
++    assert rec["commission"] == pytest.approx(0.0)
++
++
++# ===========================================================================
++# NaN / Infinity (ТЗ §5.4)
++# ===========================================================================
++
++class _FakeRMV3:
++    def export_state(self):
++        return {"fake": True}
++
++    def import_state(self, state):
++        pass
++
++
++def _make_buy_pos(figi=FIGI, entry=100.0, lots=10):
++    from datetime import datetime, timezone
++    return TrackedPosition(
++        figi=figi, ticker=TICKER, direction="BUY", entry_price=entry,
++        quantity=lots, sl_price=entry * 0.98, tp_price=entry * 1.04,
++        lot_size=1, state=PositionState.OPEN, trade_id="t-v3",
++        price_before_order=entry, close_price_before_order=entry,
++        order_send_time=datetime.now(timezone.utc).isoformat(),
++    )
++
++
++def _enrich_rejects(env_v3, monkeypatch, *, entry_commission, exec_price):
++    """Общий сценарий: невалидное значение -> False без мутации объекта."""
++    from execution import ExecutionMonitor as EM
++
++    class C:
++        async def get_sandbox_order_state(self, oid, order_id_type=None):
++            return None
++
++    pos = _make_buy_pos()
++    monitor = EM(C())
++    monitor.positions[pos.figi] = pos
++    monkeypatch.setattr(main, "_save_state", lambda m, r: True)
++    ok = main._enrich_buy_entry_metadata(
++        monitor, _FakeRMV3(), pos, entry_commission=entry_commission,
++        exec_price=exec_price, order_id=OID, source="v3")
++    assert ok is False
++    assert pos.entry_actual_commission is None, "частичная мутация запрещена"
++    assert pos.execution_price is None, "частичная мутация запрещена"
++
++
++def test_v3_enrich_inf_commission_rejected_no_mutation(env_v3, monkeypatch):
++    """+Infinity в комиссии: операция ЦЕЛИКОМ неудачна, объект не изменён,
++    невалидное значение не попадает в State (ТЗ §5.4)."""
++    _enrich_rejects(env_v3, monkeypatch,
++                    entry_commission=float("inf"), exec_price=100.5)
++
++
++def test_v3_enrich_nan_price_rejected_no_mutation(env_v3, monkeypatch):
++    """NaN в цене исполнения: операция ЦЕЛИКОМ неудачна, объект не изменён."""
++    _enrich_rejects(env_v3, monkeypatch,
++                    entry_commission=1.5, exec_price=float("nan"))
++
++
++def test_v3_enrich_inf_price_rejected_no_mutation(env_v3, monkeypatch):
++    """+Infinity в цене исполнения: операция ЦЕЛИКОМ неудачна, объект
++    не изменён (прежде inf проходил проверку > 0)."""
++    _enrich_rejects(env_v3, monkeypatch,
++                    entry_commission=None, exec_price=float("inf"))
++
++
++def test_v3_enrich_nonfinite_does_not_break_next_valid_call(env_v3, monkeypatch):
++    """После невалидного вызова штатный вызов с корректными значениями
++    работает и сохраняет данные (функция stateless, отката мусора нет)."""
++    from execution import ExecutionMonitor as EM
++
++    class C:
++        async def get_sandbox_order_state(self, oid, order_id_type=None):
++            return None
++
++    pos = _make_buy_pos()
++    monitor = EM(C())
++    monitor.positions[pos.figi] = pos
++    monkeypatch.setattr(main, "_save_state", lambda m, r: True)
++    assert main._enrich_buy_entry_metadata(
++        monitor, _FakeRMV3(), pos, entry_commission=float("inf"),
++        exec_price=100.5, order_id=OID, source="v3") is False
++    assert main._enrich_buy_entry_metadata(
++        monitor, _FakeRMV3(), pos, entry_commission=1.5,
++        exec_price=100.5, order_id=OID, source="v3") is True
++    assert pos.entry_actual_commission == pytest.approx(1.5)
++    assert pos.execution_price == pytest.approx(100.5)
++
++
++def test_v3_extract_commission_nonfinite_is_none_zero_kept():
++    """_extract_commission: NaN/±Inf -> None (отсутствие подтверждённого
++    значения); 0.0 — подтверждённый ноль, None не подменяет его."""
++    st = FakeState(status_code=FILL, lots_executed=5, price_units=500.0,
++                   commission=0.0)
++    assert ExecutionMonitor._extract_commission(st) == 0.0
++    st2 = FakeState(status_code=FILL, lots_executed=5, price_units=500.0)
++    st2.executed_commission = _MV(float("inf"))
++    assert ExecutionMonitor._extract_commission(st2) is None
++    st3 = FakeState(status_code=FILL, lots_executed=5, price_units=500.0)
++    st3.executed_commission = _MV(float("nan"))
++    assert ExecutionMonitor._extract_commission(st3) is None
++    st4 = FakeState(status_code=FILL, lots_executed=5, price_units=500.0,
++                    commission=None)
++    assert ExecutionMonitor._extract_commission(st4) is None
+--- /dev/null
++++ b/tests/conftest.py
+@@ -0,0 +1,21 @@
++# tests/conftest.py — CORRECTIVE AUDIT V3 (ТЗ §5.15, тестовая инфраструктура).
++#
++# Причина появления: subprocess-скрипты tests/test_persistence.py и
++# корневого test_persistence.py импортируют `import tests.conftest` +
++# `from tests.conftest import _install_stubs`, но файл tests/conftest.py
++# в дереве ОТСУТСТВОВАЛ — SDK-заглушки жили только в корневом conftest.py
++# (шапка которого при этом самоидентифицируется как «tests/conftest.py»).
++# В результате оба subprocess-теста persistence падали с
++# ModuleNotFoundError('t_tech') вне зависимости от тестируемой логики
++# сохранения/восстановления state.json.
++#
++# Исправление: шим реэкспортирует установщик заглушек из корневого
++# conftest.py — единственного источника истины по заглушкам; дублирование
++# логики не создаётся. Утверждения тестов не меняются, изоляция
++# _isolate_main_globals (autouse) продолжает определяться корневым
++# conftest и применяется pytest'ом ко всем подкаталогам как прежде.
++#
++# Идемпотентность: _install_stubs() ставит заглушки через
++# sys.modules.setdefault — повторные вызовы безопасны (проверено на
++# subprocess-прогонах V3).
++from conftest import _install_stubs  # noqa: F401
+--- a/tests/test_execution.py
++++ b/tests/test_execution.py
+@@ -4,7 +4,15 @@
+ import types
+ from pathlib import Path
+ 
+-ROOT = Path(__file__).resolve().parent.parent
++# CORRECTIVE AUDIT V3 (ТЗ §5.15, тестовая инфраструктура): путь к
++# execution.py теперь определяется устойчиво. Прежний вариант
++# (ROOT = parent.parent) работал только для tests/-копии: при запуске
++# файла из КОРНЯ проекта parent.parent указывал НАД каталогом проекта
++# и сборка теста падала с FileNotFoundError до выполнения любых
++# утверждений. Файл разрешается от ближайшего каталога, где execution.py
++# реально лежит; утверждения тестов не меняются.
++_HERE = Path(__file__).resolve().parent
++ROOT = _HERE if (_HERE / "execution.py").is_file() else _HERE.parent
+ sys.modules.setdefault("config", types.ModuleType("config"))
+ spec = importlib.util.spec_from_file_location("execution_under_test", ROOT / "execution.py")
+ mod = importlib.util.module_from_spec(spec)
+@@ -12,7 +20,7 @@
+ 
+ PS = mod.PositionState
+ class Client:
+-    async def get_sandbox_order_state(self, oid):
++    async def get_sandbox_order_state(self, oid, order_id_type=None):
+         return None
+ 
+ def make_position(qty=10):
+@@ -39,13 +47,23 @@
+     )
+     assert p.quantity == 6
+     assert p.close_orders["SELL1"]["applied_lots"] == 4
+-    # terminal cancellation; leftover 6 shares stay open
++    # terminal cancellation; leftover 6 shares NOT re-opened yet:
++    # v2.3.3-stage1 — остаток разрешается в OPEN только после подтверждения
++    # брокерским снимком (resolve_uncertain); завершённая заявка очищена.
+     mod.ExecutionMonitor.apply_close_execution(
+         mod.ExecutionMonitor(None), p, "SELL1", 4, "CANCELLED",
+         requested_lots=10
+     )
+     assert p.quantity == 6
++    assert p.state == PS.UNCERTAIN
++    assert p.close_order_id is None
++    # брокер подтверждает остаток 6 лотов — штатное разрешение остатка
++    m1 = mod.ExecutionMonitor(None)
++    m1.resolve_uncertain(
++        p, {"FIGI1": types.SimpleNamespace(lots=6, direction="LONG")}
++    )
+     assert p.state == PS.OPEN
++    assert p.quantity == 6
+     # second order has a fresh cursor
+     p.close_order_id = "SELL2"
+     p.close_requested_lots = 6
+@@ -85,12 +103,26 @@
+     assert p.state == PS.CLOSED
+ 
+ def test_terminal_partial_sell_reopens_remaining_position():
++    """v2.3.3-stage1: CANCELLED с частичным исполнением учитывает лоты
++    per-order cursor'ом и очищает заявку, но остаток разрешается в OPEN
++    ТОЛЬКО после подтверждения брокерским снимком (resolve_uncertain).
++    Прежнее немедленное OPEN позволяло SL/TP отправить новую SELL до
++    сверки остатка с брокером (риск перепродажи)."""
+     _, p = make_position(7)
+     m = mod.ExecutionMonitor(None)
+     m.add_close_order(p, "S1", 7)
+     m.apply_close_execution(p, "S1", 3, "CANCELLED", requested_lots=7)
+     assert p.quantity == 4
++    assert p.state == PS.UNCERTAIN       # НЕ OPEN: сначала сверка с брокером
++    assert p.close_order_id is None      # завершённая заявка очищена
++    assert p.close_orders["S1"]["status"] == "CANCELLED"
++    assert p.close_orders["S1"]["applied_lots"] == 3
++    # брокер подтверждает остаток 4 лота — штатное разрешение остатка
++    m.resolve_uncertain(
++        p, {"FIGI1": types.SimpleNamespace(lots=4, direction="LONG")}
++    )
+     assert p.state == PS.OPEN
++    assert p.quantity == 4
+ 
+ def test_lower_cumulative_is_uncertain_without_quantity_change():
+     _, p = make_position(7)
+--- a/tests/test_fail_closed.py
++++ b/tests/test_fail_closed.py
+@@ -26,7 +26,8 @@
+         # Возвращаем пустой словарь — trading_cycle выйдет на «нет цен».
+         return {}
+ 
+-    async def get_sandbox_order_state(self, order_id):
++    async def get_sandbox_order_state(self, order_id, order_id_type=None):
++        # ЭТАП 5Б: ЯВНЫЙ тип идентификатора в контракте GetOrderState.
+         return self.order_states.get(order_id)
+ 
+     def is_uncertain(self):
+@@ -55,7 +56,7 @@
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_trading_cycle_blocks_entry_on_positions_error():
++async def test_trading_cycle_blocks_entry_on_positions_error(monkeypatch):
+     """
+     Если get_positions() вернул None перед входом — новые входы запрещены.
+     get_last_prices возвращает {} — trading_cycle выходит на «Нет цен» до проверки positions.
+@@ -63,7 +64,9 @@
+     """
+     client = FakeClient(positions=None, raise_on_positions=True)
+     mon = ExecutionMonitor(client)
+-    main.reconcile_done = True
++    # Изоляция: раньше прямое присваивание main.reconcile_done = True
++    # переживало тест. monkeypatch восстанавливает значение автоматически.
++    monkeypatch.setattr(main, "reconcile_done", True)
+     # reconcile при ошибке сохраняет UNCERTAIN и сбрасывает reconcile_done.
+     await main.reconcile(client, mon)
+     assert client.uncertain_state is True
+@@ -71,18 +74,19 @@
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_trading_cycle_exits_on_no_prices():
++async def test_trading_cycle_exits_on_no_prices(monkeypatch):
+     """Если цен нет — цикл корректно выходит, не отправляя заявок."""
+     client = FakeClient(positions={})
+     mon = ExecutionMonitor(client)
+-    import main as m
+-    old_top = m.top_instruments
+-    m.top_instruments = []
+-    try:
+-        # Не должно падать и не должно отправлять заявок.
+-        await main.trading_cycle(client, None, None, mon)
+-    finally:
+-        m.top_instruments = old_top
++    # Изоляция: раньше ручное сохранение/восстановление top_instruments
++    # через try/finally; кроме того, цикл завершался _save_state_checked
++    # с rm=None — флаг state_save_failed переживал тест и блокировал входы
++    # в СЛЕДУЮЩИХ тестах (test_main::trading_cycle). monkeypatch
++    # восстанавливает оба значения автоматически.
++    monkeypatch.setattr(main, "top_instruments", [])
++    monkeypatch.setattr(main, "state_save_failed", False)
++    # Не должно падать и не должно отправлять заявок.
++    await main.trading_cycle(client, None, None, mon)
+ 
+ 
+ @pytest.mark.asyncio
+@@ -161,6 +165,9 @@
+     pos.close_reason = "TP"
+     pos.close_price_before_order = 101.0
+     pos.close_requested_at = "2026-01-01T00:00:00+00:00"
++    # v2.3.1-stage1 (ТЗ-5): цена 101.0 — из исполненного close-ордера
++    # (маркер как у apply_close_execution), P&L рассчитывается.
++    pos.exit_price_confirmed = True
+     pos.actual_commission = 0.5          # выход — фактическая
+     pos.entry_actual_commission = None   # вход — модельная
+ 
+--- a/tests/test_main.py
++++ b/tests/test_main.py
+@@ -22,7 +22,8 @@
+     async def get_positions(self):
+         return self._positions
+ 
+-    async def get_sandbox_order_state(self, order_id):
++    async def get_sandbox_order_state(self, order_id, order_id_type=None):
++        # ЭТАП 5Б: ЯВНЫЙ тип идентификатора в контракте GetOrderState.
+         return self.order_states.get(order_id)
+ 
+     def is_uncertain(self):
+@@ -159,7 +160,7 @@
+ # Дополнение к tests/test_main.py
+ 
+ @pytest.mark.asyncio
+-async def test_trading_cycle_not_fill_but_executed_creates_position(monkeypatch):
++async def test_trading_cycle_not_fill_but_executed_creates_position(monkeypatch, tmp_path):
+     """
+     status=NEW (не FILL), но get_sandbox_order_state показал lots_executed > 0
+     -> создаётся TrackedPosition (этап 4.1).
+@@ -215,10 +216,29 @@
+     rm.export_state = MagicMock(return_value={})
+     rm.import_state = MagicMock()
+ 
+-    main.top_instruments = [{"figi": "F1", "ticker": "MVID"}]
+-    main.reconcile_done = True
+-    main.is_trading_enabled = MagicMock(return_value=True)
+-    main._save_state = MagicMock(return_value=True)
++    # Изоляция (аудит pytest-изоляции): раньше здесь были ПРЯМЫЕ присваивания
++    # main.top_instruments/reconcile_done/is_trading_enabled/_save_state —
++    # они переживали тест и ломали следующие (test_trading_flag:
++    # is_trading_enabled() возвращал MagicMock; test_persistence:
++    # _save_state подменялся MagicMock'ом без записи файла).
++    # Подмены monkeypatch восстанавливаются pytest'ом автоматически;
++    # сценарий и ожидания теста НЕ изменились.
++    # state_save_failed и ledger_ref задаются явно: trading_cycle читает их
++    # как входное состояние (fail-closed блокирует входы при
++    # state_save_failed=True, оставшемся от предыдущих тестов, и при
++    # отсутствующем реестре заявок — P0-2).
++    monkeypatch.setattr(main, "top_instruments", [{"figi": "F1", "ticker": "MVID"}])
++    monkeypatch.setattr(main, "reconcile_done", True)
++    monkeypatch.setattr(main, "state_save_failed", False)
++    monkeypatch.setattr(main, "is_trading_enabled", MagicMock(return_value=True))
++    monkeypatch.setattr(main, "_save_state", MagicMock(return_value=True))
++    # Рабочий реестр в tmp_path: шаг входов P0-2 требует доступного
++    # OrderLedger (без него вход заблокирован fail-closed — это отдельный
++    # контракт, проверяемый в других тестах); сценарий этого теста —
++    # создание позиции при не-FILL статусе с подтверждённым исполнением.
++    from order_ledger import OrderLedger
++    ledger = OrderLedger(str(tmp_path / "order_ledger.jsonl"))
++    monkeypatch.setattr(main, "ledger_ref", ledger)
+ 
+     await main.trading_cycle(fake, rm, sm, monitor)
+ 
+--- a/tests/test_main_helpers.py
++++ b/tests/test_main_helpers.py
+@@ -26,7 +26,8 @@
+     async def get_positions(self):
+         return self.positions
+ 
+-    async def get_sandbox_order_state(self, order_id):
++    async def get_sandbox_order_state(self, order_id, order_id_type=None):
++        # ЭТАП 5Б: ЯВНЫЙ тип идентификатора в контракте GetOrderState.
+         return self.order_states.get(order_id)
+ 
+     async def get_instrument_info(self, figi):
+@@ -174,6 +175,9 @@
+     pos.state = PositionState.CLOSED
+     pos.executed_lots = qty
+     pos.execution_price = exit_price
++    # v2.3.1-stage1 (ТЗ-5): имитация закрытия с РЕАЛЬНОЙ ценой из исполненного
++    # close-ордера — именно так apply_close_execution выставляет маркер.
++    pos.exit_price_confirmed = True
+     pos.close_reason = "TP"
+     pos.close_price_before_order = (
+         close_price_before_order if close_price_before_order is not None else exit_price
+--- a/tests/test_p0_batch2_late_execution.py
++++ b/tests/test_p0_batch2_late_execution.py
+@@ -234,21 +234,40 @@
+ # ============================================================
+ 
+ @pytest.mark.asyncio
+-async def test_n3_unknown_figi_execution_not_registered_global_block(env):
++async def test_n3_unknown_figi_execution_not_registered_global_block(env, monkeypatch):
+     """Подтверждённое исполнение с пустым FIGI НЕ регистрируется как обычная
+     BUY-позиция: заявка остаётся UNCERTAIN, новые BUY запрещены ГЛОБАЛЬНО
+-    (в торговом цикле), существующие позиции продолжают мониториться."""
++    (в торговом цикле), существующие позиции продолжают мониториться.
++
++    Моделирование (аудит pytest-изоляции): исходный вариант пытался создать
++    INTENT с пустым FIGI через record_intent() — production-guard
++    OrderLedger.record_intent() отвергает записи без обязательных полей
++    (guard НЕ ослабляется), поэтому заявка в реестр не попадала и сценарий
++    не выполнялся. Сценарий теперь идёт штатным путём приложения: событие
++    ПОДТВЕРЖДЁННОГО исполнения (FILL, 4 лота) поступает в единую точку
++    регистрации main.register_executed_buy() БЕЗ FIGI — так же, как в
++    production (ветка P0-2); далее заявка опрашивается poll_open_orders()
++    и глобальная блокировка проверяется в полном trading_cycle."""
+     ledger = make_ledger(env.tmp_path)
+     client = FakeClient(positions={})
+     oid = "oid-nofigi"
+-    ledger.record_intent(oid, trade_id="t-nofigi", figi="", ticker=TICKER,
+-                         side="BUY", requested_lots=5)
+     client.order_states[oid] = fake_state(FILL, lots_executed=4, price_units=400)
+     monitor = ExecutionMonitor(client)
+     monitor.register(figi="BBG00EXISTING", ticker="EXIST", direction="BUY",
+                      entry_price=50.0, quantity=1, sl_price=49.0, tp_price=52.0,
+                      lot_size=1, trade_id="t-exist", entry_requested_lots=1)
+ 
++    # Реальный путь обработки подтверждённого исполнения с отсутствующим
++    # FIGI (единая точка регистрации; аналогично test_n3_register_guard_direct).
++    await main.register_executed_buy(
++        client, monitor, FakeRM(), ledger,
++        figi="", ticker=TICKER, order_id=oid, trade_id="t-nofigi",
++        reason="unit", signal_time="now", price_before_order=100.0,
++        order_send_time="now", requested_lots=5, executed_lots=4,
++        exec_price=100.0, lot_size=1, partial=False,
++        df=small_df(), source="test", ledger_status="FILL",
++    )
++    # Опрос: заявка с пустым FIGI остаётся в реестре в безопасном состоянии.
+     await main.poll_open_orders(client, monitor, FakeRM(), ledger)
+ 
+     # ПОСЛЕДСТВИЯ: позиции с пустым FIGI НЕТ
+@@ -257,16 +276,21 @@
+     assert monitor.get_position(None) is None
+     assert client.uncertain_state is True
+     rec = ledger.latest(oid)
++    assert rec is not None, "подтверждённое исполнение потеряно молча (записи реестра нет)"
+     assert rec["status"] == "UNCERTAIN", f"статус заявки: {rec['status']}"
++    assert not rec.get("figi"), "заявка с неизвестным FIGI не должна получить FIGI"
+     assert ledger.has_unknown_figi_open_orders() is True, "глобальная блокировка не активна"
+     # существующая позиция продолжается мониториться
+     assert monitor.get_position("BBG00EXISTING").state == PositionState.OPEN
+ 
+-    # глобальная блокировка действует в торговом цикле (даже после reconcile)
+-    main.ledger_ref = ledger
++    # глобальная блокировка действует в торговом цикле (даже после reconcile):
++    # брокер показывает существующую позицию — reconcile проходит без
++    # расхождений, цикл доходит до проверки has_unknown_figi_open_orders()
++    client.positions_value = {"BBG00EXISTING": PositionData(lots=1, direction="LONG",
++                                                            raw_shares=Decimal(1))}
++    monkeypatch.setattr(main, "ledger_ref", ledger)
++    monkeypatch.setattr(main, "top_instruments", [{"figi": FIGI, "ticker": TICKER}])
+     rm, sm = FakeRM(), FakeSM("BUY")
+-    main.top_instruments.clear()
+-    main.top_instruments.extend([{"figi": FIGI, "ticker": TICKER}])
+     client.prices_value = {FIGI: 100.0}
+     await main.trading_cycle(client, rm, sm, monitor, ledger)
+     assert sm.calls == 0, "новые BUY разрешены при заявке без FIGI"
+--- a/tests/test_p0_defect_fixes.py
++++ b/tests/test_p0_defect_fixes.py
+@@ -107,13 +107,7 @@
+         return self.positions_value
+ 
+     async def get_sandbox_order_state(self, order_id, order_id_type=None):
+-        # CORRECTIVE AUDIT V2 (FIX-2): сигнатура заглушки приведена к
+-        # актуальному контракту ЭТАП 5Б (production TinkoffClient и
+-        # вызывающий код main.py передают ЯВНЫЙ тип идентификатора).
+-        # Семантика заглушки НЕ меняется: поиск — по order_id,
+-        # order_id_type принимается и игнорируется (как в корневой
+-        # копии test_p0_defect_fixes.py). Явный именованный параметр
+-        # сохраняет проверку аргументов (не **kwargs).
++        # ЭТАП 5Б: ЯВНЫЙ тип идентификатора в контракте GetOrderState.
+         return self.order_states.get(order_id)
+ 
+     async def get_instrument_info(self, figi):
+@@ -126,9 +120,6 @@
+         return list(self.orders_list)
+ 
+     async def cancel_order(self, order_id, order_id_type=None):
+-        # CORRECTIVE AUDIT V2 (FIX-2): та же причина, что выше — контракт
+-        # ЭТАП 5Б (CancelOrder с ЯВНЫМ типом идентификатора); семантика
+-        # заглушки (запись вызова, ответ cancel_response) не меняется.
+         self.cancel_calls.append(order_id)
+         return self.cancel_response
+ 
+@@ -240,7 +231,7 @@
+ # ============================================================
+ 
+ @pytest.mark.asyncio
+-async def test_scenario_1_partial_buy_cancelled_portfolio_silent(env):
++async def test_scenario_1_partial_buy_cancelled_portfolio_silent(env, monkeypatch):
+     """Сценарий 1 / Дефект №1: частичный BUY, остаток CANCELLED, портфель
+     ВРЕМЕННО не показывает позицию — исполнение НЕ теряется, позиция
+     регистрируется ровно в подтверждённом количестве."""
+@@ -251,8 +242,10 @@
+     monitor = ExecutionMonitor(client)
+     rm = FakeRM(sl=95.0, tp=110.0, size=5)
+     sm = FakeSM("BUY")
+-    main.monitor_ref = monitor
+-    main.ledger_ref = ledger
++    # Изоляция: подмены через monkeypatch (раньше прямые присваивания
++    # переживали тест и утекали в следующие).
++    monkeypatch.setattr(main, "monitor_ref", monitor)
++    monkeypatch.setattr(main, "ledger_ref", ledger)
+ 
+     await run_entry_cycle(client, rm, sm, monitor, ledger)
+ 
+@@ -276,7 +269,7 @@
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_defect1_unavailable_portfolio_with_confirmed_lots_registers(env):
++async def test_defect1_unavailable_portfolio_with_confirmed_lots_registers(env, monkeypatch):
+     """Дефект №1 (снимок недоступен): брокер подтвердил lots_executed>0, но
+     свежий снимок портфеля ВТОРОЙ запрос вернул недостоверным — исполнение
+     всё равно регистрируется (отсутствие снимка не отменяет исполнение)."""
+@@ -288,8 +281,8 @@
+     monitor = ExecutionMonitor(client)
+     rm = FakeRM(sl=95.0, tp=110.0, size=5)
+     sm = FakeSM("BUY")
+-    main.monitor_ref = monitor
+-    main.ledger_ref = ledger
++    monkeypatch.setattr(main, "monitor_ref", monitor)
++    monkeypatch.setattr(main, "ledger_ref", ledger)
+ 
+     await run_entry_cycle(client, rm, sm, monitor, ledger)
+ 
+@@ -555,7 +548,15 @@
+ async def test_defect4_unknown_side_resolves_only_without_execution(env):
+     """Дефект №4 (разрешение): заявка с side=None разрешается ТОЛЬКО при
+     достоверном завершении без исполнения; при признаках исполнения остаётся
+-    UNCERTAIN (BUY не разблокируются)."""
++    UNCERTAIN (BUY не разблокируются).
++
++    Актуализация ожидания (аудит pytest-изоляции, п.5 ТЗ): противоречивый
++    сценарий (сначала брокер показал исполнение, затем «тот же» отчёт
++    утверждает завершение без исполнения) — безопасное состояние UNCERTAIN,
++    а НЕ CANCELLED: монотонный guard реестра (order_ledger.append) не даёт
++    откатить cumulative execution 2 -> 0 и fail-closed сохраняет
++    неопределённость до сверки. Достоверное разрешение БЕЗ исполнения
++    проверяется на отдельной заявке без признаков исполнения (u4)."""
+     ledger = make_ledger(env.tmp_path)
+     oid = "u3"
+     ledger.record_uncertain(oid, figi=FIGI, ticker=TICKER, side=None,
+@@ -573,28 +574,44 @@
+     # позиция НЕ регистрировалась автоматически
+     assert monitor.get_position(FIGI) is None
+ 
+-    # (б) достоверное завершение без исполнения — блокировка снимается
++    # (б) противоречивый «повторный» отчёт (исполнение 2 -> 0) — fail-closed:
++    # реестр не откатывает исполнение, заявка остаётся UNCERTAIN,
++    # блокировка BUY по FIGI сохраняется
+     client.order_states[oid] = fake_state(CANCELLED, lots_executed=0)
+     await main.poll_open_orders(client, monitor, FakeRM(), ledger)
+     rec = ledger.latest(oid)
+-    assert rec["status"] == "CANCELLED"
+-    assert ledger.figi_blocks_buy(FIGI) is False
++    assert rec["status"] == "UNCERTAIN", \
++        f"противоречивый отчёт должен сохранять fail-closed UNCERTAIN, получен {rec['status']}"
++    assert ledger.figi_blocks_buy(FIGI) is True
++
++    # (в) достоверное завершение БЕЗ исполнения заявки без признаков
++    # исполнения — блокировка по этому FIGI снимается
++    oid2 = "u4"
++    ledger.record_uncertain(oid2, figi=OTHER_FIGI, ticker="OTHER", side=None,
++                            requested_lots=5, source="startup",
++                            reason="активная заявка брокера без записи в реестре")
++    client.order_states[oid2] = fake_state(CANCELLED, lots_executed=0)
++    await main.poll_open_orders(client, monitor, FakeRM(), ledger)
++    rec2 = ledger.latest(oid2)
++    assert rec2["status"] == "CANCELLED"
++    assert ledger.figi_blocks_buy(OTHER_FIGI) is False
+ 
+ 
+ # ============================================================
+ # Дефект №5: повреждение OrderLedger не превращается в пустой реестр
+ # ============================================================
+ 
+-async def _assert_buy_blocked(env, ledger, client, monitor):
++async def _assert_buy_blocked(env, monkeypatch, ledger, client, monitor):
+     rm, sm = FakeRM(), FakeSM("BUY")
+-    main.ledger_ref = ledger
++    # Изоляция: подмена через monkeypatch вместо прямого присваивания.
++    monkeypatch.setattr(main, "ledger_ref", ledger)
+     await run_entry_cycle(client, rm, sm, monitor, ledger)
+     assert sm.calls == 0, "новые BUY не заблокированы"
+     assert client.last_post is None
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_scenario_10_corrupted_ledger_blocks_buy(env):
++async def test_scenario_10_corrupted_ledger_blocks_buy(env, monkeypatch):
+     """Сценарий 10 / Дефект №5: повреждённая строка журнала (в середине) —
+     реестр недостоверен, новые BUY запрещены, журнал НЕ перезаписывается,
+     целые записи продолжают читаться (best effort)."""
+@@ -617,7 +634,7 @@
+ 
+     client = FakeClient(positions={})
+     monitor = ExecutionMonitor(client)
+-    await _assert_buy_blocked(env, ledger, client, monitor)
++    await _assert_buy_blocked(env, monkeypatch, ledger, client, monitor)
+ 
+ 
+ @pytest.mark.asyncio
+@@ -629,6 +646,15 @@
+         f.write(ledger_line("oidC", status="INTENT", figi=FIGI) + "\n")
+ 
+     ledger = OrderLedger(path)
++
++    # Изоляция (аудит pytest-изоляции): подмена builtins.open выполняется в
++    # СКОП-контексте и снимается сразу после ledger.load(). Раньше здесь был
++    # monkeypatch.undo(), который снимал ВСЕ подмены этого теста, включая
++    # изоляцию файлов диагностики (EVENTS_FILE/TRADES_FILE) и STATE_FILE из
++    # conftest-фикстур: последующий trading_cycle писал SIGNAL/RECONCILE_OK
++    # в ПРОИЗВОДСТВЕННЫЙ research_events.jsonl в корне репозитория и
++    # state.json — нарушение критерия «производственные журналы не
++    # изменяются при прогоне pytest».
+     real_open = builtins.open
+ 
+     def broken_open(file, mode="r", *a, **kwargs):
+@@ -640,19 +666,19 @@
+             raise PermissionError(13, "simulated read failure")
+         return real_open(file, mode, *a, **kwargs)
+ 
+-    monkeypatch.setattr(builtins, "open", broken_open)
+-    ledger.load()
++    with monkeypatch.context() as m:
++        m.setattr(builtins, "open", broken_open)
++        ledger.load()
+     assert ledger.is_reliable() is False, "ошибка чтения не перевела реестр в недостоверность"
+     assert ledger.unreliable_reason
+-    monkeypatch.undo()
+ 
+     client = FakeClient(positions={})
+     monitor = ExecutionMonitor(client)
+-    await _assert_buy_blocked(env, ledger, client, monitor)
++    await _assert_buy_blocked(env, monkeypatch, ledger, client, monitor)
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_defect5_tail_corruption_no_truncate_blocks_buy(env):
++async def test_defect5_tail_corruption_no_truncate_blocks_buy(env, monkeypatch):
+     """Дефект №5: повреждённый ХВОСТ журнала не обрезается, не молчит и
+     запрещает новые BUY до восстановления целостности."""
+     path = str(env.tmp_path / "order_ledger.jsonl")
+@@ -667,7 +693,7 @@
+     assert '"trunc' in raw, "журнал был перезаписан/обрезан"
+     client = FakeClient(positions={})
+     monitor = ExecutionMonitor(client)
+-    await _assert_buy_blocked(env, ledger, client, monitor)
++    await _assert_buy_blocked(env, monkeypatch, ledger, client, monitor)
+ 
+ 
+ @pytest.mark.asyncio
+--- a/tests/test_persistence.py
++++ b/tests/test_persistence.py
+@@ -136,6 +136,9 @@
+         import json, os, sys
+         sys.path.insert(0, r"{os.getcwd()}")
+         from decimal import Decimal
++        import tests.conftest  # SDK-заглушки из tests/conftest.py (no-op при реальном SDK)
++        from tests.conftest import _install_stubs
++        _install_stubs()
+         import main
+         from execution import ExecutionMonitor
+         from risk_manager import RiskManager
+@@ -186,6 +189,9 @@
+     save_script = textwrap.dedent(f"""
+         import sys, os
+         sys.path.insert(0, r"{os.getcwd()}")
++        import tests.conftest  # SDK-заглушки из tests/conftest.py (no-op при реальном SDK)
++        from tests.conftest import _install_stubs
++        _install_stubs()
+         import main
+         from execution import ExecutionMonitor
+         from risk_manager import RiskManager
+@@ -212,6 +218,9 @@
+     load_script = textwrap.dedent(f"""
+         import sys, os
+         sys.path.insert(0, r"{os.getcwd()}")
++        import tests.conftest  # SDK-заглушки из tests/conftest.py (no-op при реальном SDK)
++        from tests.conftest import _install_stubs
++        _install_stubs()
+         import main
+         from execution import ExecutionMonitor
+         from risk_manager import RiskManager
+--- a/tests/test_strategy.py
++++ b/tests/test_strategy.py
+@@ -143,6 +143,9 @@
+     Повторный вызов на той же свече не должен засчитывать
+     второе подтверждение смены режима.
+     """
++    monkeypatch.setattr(config, "ADX_TREND_THRESHOLD", 25)
++    monkeypatch.setattr(config, "ADX_HYSTERESIS_CANDLES", 2)
++
+     state = {"value": 20.0}
+     install_fake_adx(monkeypatch, state)
+ 
+@@ -168,6 +171,7 @@
+     При CONSERVATIVE смена режима происходит после двух
+     последовательных новых свечей с подтверждением.
+     """
++    monkeypatch.setattr(config, "ADX_TREND_THRESHOLD", 25)
+     monkeypatch.setattr(config, "ADX_HYSTERESIS_CANDLES", 2)
+ 
+     state = {"value": 20.0}
+@@ -196,6 +200,7 @@
+     Если кандидат на смену режима отменяется,
+     незавершённая серия подтверждений сбрасывается.
+     """
++    monkeypatch.setattr(config, "ADX_TREND_THRESHOLD", 25)
+     monkeypatch.setattr(config, "ADX_HYSTERESIS_CANDLES", 2)
+ 
+     state = {"value": 20.0}

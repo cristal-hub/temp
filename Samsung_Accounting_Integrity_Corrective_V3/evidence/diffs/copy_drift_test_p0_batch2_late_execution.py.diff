@@ -1,0 +1,73 @@
+--- a/root_canonical/test_p0_batch2_late_execution.py
++++ b/tests_stale_copy/test_p0_batch2_late_execution.py
+@@ -234,40 +234,21 @@
+ # ============================================================
+ 
+ @pytest.mark.asyncio
+-async def test_n3_unknown_figi_execution_not_registered_global_block(env, monkeypatch):
++async def test_n3_unknown_figi_execution_not_registered_global_block(env):
+     """Подтверждённое исполнение с пустым FIGI НЕ регистрируется как обычная
+     BUY-позиция: заявка остаётся UNCERTAIN, новые BUY запрещены ГЛОБАЛЬНО
+-    (в торговом цикле), существующие позиции продолжают мониториться.
+-
+-    Моделирование (аудит pytest-изоляции): исходный вариант пытался создать
+-    INTENT с пустым FIGI через record_intent() — production-guard
+-    OrderLedger.record_intent() отвергает записи без обязательных полей
+-    (guard НЕ ослабляется), поэтому заявка в реестр не попадала и сценарий
+-    не выполнялся. Сценарий теперь идёт штатным путём приложения: событие
+-    ПОДТВЕРЖДЁННОГО исполнения (FILL, 4 лота) поступает в единую точку
+-    регистрации main.register_executed_buy() БЕЗ FIGI — так же, как в
+-    production (ветка P0-2); далее заявка опрашивается poll_open_orders()
+-    и глобальная блокировка проверяется в полном trading_cycle."""
++    (в торговом цикле), существующие позиции продолжают мониториться."""
+     ledger = make_ledger(env.tmp_path)
+     client = FakeClient(positions={})
+     oid = "oid-nofigi"
++    ledger.record_intent(oid, trade_id="t-nofigi", figi="", ticker=TICKER,
++                         side="BUY", requested_lots=5)
+     client.order_states[oid] = fake_state(FILL, lots_executed=4, price_units=400)
+     monitor = ExecutionMonitor(client)
+     monitor.register(figi="BBG00EXISTING", ticker="EXIST", direction="BUY",
+                      entry_price=50.0, quantity=1, sl_price=49.0, tp_price=52.0,
+                      lot_size=1, trade_id="t-exist", entry_requested_lots=1)
+ 
+-    # Реальный путь обработки подтверждённого исполнения с отсутствующим
+-    # FIGI (единая точка регистрации; аналогично test_n3_register_guard_direct).
+-    await main.register_executed_buy(
+-        client, monitor, FakeRM(), ledger,
+-        figi="", ticker=TICKER, order_id=oid, trade_id="t-nofigi",
+-        reason="unit", signal_time="now", price_before_order=100.0,
+-        order_send_time="now", requested_lots=5, executed_lots=4,
+-        exec_price=100.0, lot_size=1, partial=False,
+-        df=small_df(), source="test", ledger_status="FILL",
+-    )
+-    # Опрос: заявка с пустым FIGI остаётся в реестре в безопасном состоянии.
+     await main.poll_open_orders(client, monitor, FakeRM(), ledger)
+ 
+     # ПОСЛЕДСТВИЯ: позиции с пустым FIGI НЕТ
+@@ -276,21 +257,16 @@
+     assert monitor.get_position(None) is None
+     assert client.uncertain_state is True
+     rec = ledger.latest(oid)
+-    assert rec is not None, "подтверждённое исполнение потеряно молча (записи реестра нет)"
+     assert rec["status"] == "UNCERTAIN", f"статус заявки: {rec['status']}"
+-    assert not rec.get("figi"), "заявка с неизвестным FIGI не должна получить FIGI"
+     assert ledger.has_unknown_figi_open_orders() is True, "глобальная блокировка не активна"
+     # существующая позиция продолжается мониториться
+     assert monitor.get_position("BBG00EXISTING").state == PositionState.OPEN
+ 
+-    # глобальная блокировка действует в торговом цикле (даже после reconcile):
+-    # брокер показывает существующую позицию — reconcile проходит без
+-    # расхождений, цикл доходит до проверки has_unknown_figi_open_orders()
+-    client.positions_value = {"BBG00EXISTING": PositionData(lots=1, direction="LONG",
+-                                                            raw_shares=Decimal(1))}
+-    monkeypatch.setattr(main, "ledger_ref", ledger)
+-    monkeypatch.setattr(main, "top_instruments", [{"figi": FIGI, "ticker": TICKER}])
++    # глобальная блокировка действует в торговом цикле (даже после reconcile)
++    main.ledger_ref = ledger
+     rm, sm = FakeRM(), FakeSM("BUY")
++    main.top_instruments.clear()
++    main.top_instruments.extend([{"figi": FIGI, "ticker": TICKER}])
+     client.prices_value = {FIGI: 100.0}
+     await main.trading_cycle(client, rm, sm, monitor, ledger)
+     assert sm.calls == 0, "новые BUY разрешены при заявке без FIGI"

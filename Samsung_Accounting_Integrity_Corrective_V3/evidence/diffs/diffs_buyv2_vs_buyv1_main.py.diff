@@ -1,0 +1,128 @@
+--- versions/buy_v1/main.py	2026-11-25 18:36:52.801698835 +0000
++++ versions/buy_v2/main.py	2026-11-25 18:37:04.276727561 +0000
+@@ -3308,45 +3308,107 @@
+     """BUY ACCOUNTING AUDIT (v1, FIX-4): позднее обогащение существующей
+     записи позиции подтверждёнными метаданными брокера (ТЗ-E).
+ 
+-    Правила:
++    CORRECTIVE AUDIT V2 (FIX-1, атомарность): функция переработана по схеме
++    validate → stage → commit → checked save:
++      1. ВАЛИДАЦИЯ: все переданные значения проверяются ДО любого изменения
++         объекта позиции. Значение, не интерпретируемое как число, делает
++         операцию ЦЕЛИКОМ неудачной (return False) — частичная мутация
++         невозможна (прежняя версия успевала записать комиссию в объект
++         позиции до исключения в exec_price, оставляя изменённый объект
++         при формальном отказе операции).
++      2. ПОДГОТОВКА: новые значения готовятся локально (dict staged),
++         объект позиции не изменяется; обогащаются только поля, которым
++         требуется заполнение.
++      3. ПРИМЕНЕНИЕ: подготовленные значения применяются согласованно,
++         одним блоком, с сохранением прежних значений для отката.
++      4. СОХРАНЕНИЕ С КОНТРОЛЕМ: результат _save_state_checked()
++         ОБЯЗАТЕЛЬНО проверяется. True возвращается ТОЛЬКО после
++         подтверждённой записи state.json (прежняя версия возвращала True
++         даже при неудачном сохранении — вызывающий код считал операцию
++         успешной, и последующая запись реестра закрепляла новые
++         метаданные при устаревшем state.json).
++      5. FAIL-CLOSED при ошибке сохранения: применённые значения
++         откатываются к прежним (память соответствует несохранённому
++         state.json), событие BUY_ENTRY_METADATA_ENRICHED не пишется
++         (в журнале не появляется ложное подтверждение обогащения),
++         возвращается False. Повторный отчёт брокера повторит обогащение
++         (двойное применение исключено: откат возвращает прежние значения).
++         Неблокирующая деградация сохраняется: _save_state_checked
++         выставляет state_save_failed (новые входы запрещены до
++         успешного сохранения).
++
++    Правила (не менялись):
+       * заполняются ТОЛЬКО отсутствующие значения (None):
+         entry_actual_commission (комиссия BUY-исполнения) и execution_price
+         (цена BUY-исполнения — актуальна для RECOVERY-записей, у которых
+         цена была неизвестна при регистрации);
++      * семантика нулевой комиссии сохранена: 0.0 — ДОСТОВЕРНОЕ реальное
++        значение брокера; None — отсутствие данных; None не подменяется
++        нулём без подтверждённого значения;
+       * уже сохранённые значения НЕ перезаписываются (конфликт значений
+         идентифицируется на уровне реестра заявок — FIX-1 в order_ledger);
+-      * лоты, цена входа (entry_price), SL/TP и состояние позиции НЕ
++      * лоты, цена входа (entry_price), SL/TP и состояние позиции,
++        identity/FIGI/side/order_id и правила восстановления позиции НЕ
+         меняются — обогащаются только метаданные;
+-      * каждое изменение немедленно сохраняется в state.json
+-        (_save_state_checked) — реестр и state утверждают одно и то же.
++      * B2 close accounting не затрагивается (функция работает только
++        с entry-метаданными BUY-позиции).
+ 
+-    Возвращает True, если хотя бы одно поле заполнено."""
++    Возвращает True, если хотя бы одно поле заполнено И state.json
++    подтверждённо сохранён; False во всех остальных случаях."""
+     if pos is None:
+         return False
+-    enriched = []
++
++    # --- 1. ВАЛИДАЦИЯ входных значений (объект позиции не изменяется) ---
+     try:
+-        if entry_commission is not None and pos.entry_actual_commission is None:
+-            value = float(entry_commission)
+-            if value >= 0:
+-                pos.entry_actual_commission = value
+-                enriched.append("entry_commission")
+-        if (exec_price is not None and float(exec_price) > 0
+-                and pos.execution_price is None):
+-            pos.execution_price = float(exec_price)
+-            enriched.append("execution_price")
++        commission_value = (float(entry_commission)
++                            if entry_commission is not None else None)
++        price_value = float(exec_price) if exec_price is not None else None
+     except (TypeError, ValueError):
+         return False
+-    if not enriched:
++
++    # --- 2. ПОДГОТОВКА новых значений (без изменения объекта позиции) ---
++    staged = {}
++    if (commission_value is not None and commission_value >= 0
++            and pos.entry_actual_commission is None):
++        # 0.0 — подтверждённый ноль брокера: сохраняется как 0.0.
++        staged["entry_actual_commission"] = commission_value
++    if (price_value is not None and price_value > 0
++            and pos.execution_price is None):
++        staged["execution_price"] = price_value
++    if not staged:
++        return False
++
++    # --- 3. ПРИМЕНЕНИЕ подготовленных значений согласованно ---
++    previous = {field: getattr(pos, field) for field in staged}
++    for field, value in staged.items():
++        setattr(pos, field, value)
++
++    # --- 4. СОХРАНЕНИЕ С ОБЯЗАТЕЛЬНОЙ ПРОВЕРКОЙ РЕЗУЛЬТАТА ---
++    if not _save_state_checked(monitor, rm):
++        # --- 5. FAIL-CLOSED: откат — память == несохранённый state.json.
++        # Никаких подтверждений (event/True) обогащение не получает.
++        for field, value in previous.items():
++            setattr(pos, field, value)
++        logging.error(
++            f"[register] {getattr(pos, 'ticker', '?')}: обогащение entry-"
++            f"метаданных заявки {order_id} НЕ подтверждено: state.json не "
++            f"сохранён — значения откатены, подтверждение не пишется "
++            f"(повторный отчёт брокера повторит обогащение)"
++        )
++        research_logger.log_event("BUY_ENTRY_METADATA_SAVE_FAILED", {
++            "figi": pos.figi, "ticker": pos.ticker, "order_id": order_id,
++            "attempted": sorted(staged),
++            "source": source,
++        })
+         return False
+     research_logger.log_event("BUY_ENTRY_METADATA_ENRICHED", {
+         "figi": pos.figi, "ticker": pos.ticker, "order_id": order_id,
+-        "enriched": enriched,
++        "enriched": sorted(staged),
+         "entry_commission": pos.entry_actual_commission,
+         "execution_price": pos.execution_price,
+         "position_state": pos.state.value if pos.state else None,
+         "source": source,
+     })
+-    _save_state_checked(monitor, rm)
+     return True
+ 
+ 

@@ -1,0 +1,53 @@
+2026-11-25 19:06:22,775 - INFO - [reconcile] Позиций нет (достоверно).
+2026-11-25 19:06:22,777 - ERROR - TEST: ЧАСТИЧНОЕ исполнение покупки — отмена остатка (order_id=0307ab19-1fe1-4df3-bc93-818976adcdf5)
+2026-11-25 19:06:22,777 - WARNING - TEST: остаток отменён, портфель пока не показывает позицию, но брокер подтвердил 2 исполненных лот — регистрация (Дефект №1)
+2026-11-25 19:06:22,777 - WARNING - [execution] RECOVERY TEST qty=2 source=no_price
+2026-11-25 19:06:22,777 - INFO - [notify] ⚠️ <b>TEST</b> BUY исполнен (2 лот.), цена входа/SL/TP уточняются
+Позиция зарегистрирована как RECOVERY — контроль сохранён, автозакрытие отключено.
+2026-11-25 19:06:22,778 - WARNING - [register] TEST: активная позиция уже есть (state=RECOVERY, order=0307ab19-1fe1-4df3-bc93-818976adcdf5) — дубль не создаётся (order_id=0307ab19-1fe1-4df3-bc93-818976adcdf5)
+2026-11-25 19:06:22,779 - INFO - [recovery] TEST: заявка 0307ab19-1fe1-4df3-bc93-818976adcdf5 ещё активна (status=NEW) — возможны дополнительные исполнения, промоция отложена до терминального статуса
+2026-11-25 19:06:22,779 - INFO - [reconcile] Все позиции совпадают (1 активных).
+2026-11-25 19:06:22,779 - INFO - TEST: позиция уже открыта/в неопределённости, пропуск
+2026-11-25 19:06:22,779 - WARNING - [poll] TEST: заявка 0307ab19-1fe1-4df3-bc93-818976adcdf5 CANCELLED с частичным исполнением 2 лот — регистрирую исполненную часть (статус заявки сохраняется как CANCELLED)
+2026-11-25 19:06:22,779 - WARNING - [register] TEST: активная позиция уже есть (state=RECOVERY, order=0307ab19-1fe1-4df3-bc93-818976adcdf5) — дубль не создаётся (order_id=0307ab19-1fe1-4df3-bc93-818976adcdf5)
+2026-11-25 19:06:22,779 - WARNING - [recovery] TEST: RECOVERY→OPEN entry=100.0000 SL=95.0000 TP=110.0000 qty=2
+2026-11-25 19:06:22,780 - INFO - [notify] ✅ <b>TEST</b>: RECOVERY разрешена
+Цена входа: 100.0000
+SL: 95.0000
+TP: 110.0000
+Лотов: 2 — позиция под штатным контролем.
+2026-11-25 19:06:22,780 - INFO - [reconcile] Все позиции совпадают (1 активных).
+2026-11-25 19:06:22,780 - INFO - TEST: позиция уже открыта/в неопределённости, пропуск
+2026-11-25 19:06:22,780 - WARNING - [poll] TEST: заявка 0307ab19-1fe1-4df3-bc93-818976adcdf5 CANCELLED с частичным исполнением 5 лот — регистрирую исполненную часть (статус заявки сохраняется как CANCELLED)
+2026-11-25 19:06:22,780 - WARNING - [register] TEST: активная позиция уже есть (state=OPEN, order=0307ab19-1fe1-4df3-bc93-818976adcdf5) — дубль не создаётся (order_id=0307ab19-1fe1-4df3-bc93-818976adcdf5)
+2026-11-25 19:06:22,781 - INFO - [notify] ⚠️ <b>TEST</b>: позднее исполнение входной заявки
+Добавлено лотов: +3 (итого 5)
+Цена входа: 100.0000 (не менялась)
+SL: 95.0000
+TP: 110.0000 — сохранены
+2026-11-25 19:06:22,781 - INFO - [reconcile] Все позиции совпадают (1 активных).
+2026-11-25 19:06:22,781 - INFO - TEST: позиция уже открыта/в неопределённости, пропуск
+F
+### TRACE записей ledger:
+[0] IN  status='INTENT' side='BUY' avg='ABSENT' lots='ABSENT' comm='ABSENT'
+     OUT status='INTENT' avg=None lots=None comm=None
+         reason=''
+[1] IN  status='PARTIALLYFILL' side='BUY' avg=None lots=2 comm=None
+     OUT status='PARTIALLYFILL' avg=None lots=2 comm=None
+         reason=''
+[2] IN  status='CANCELLED' side='BUY' avg=0.0 lots=2 comm=None
+     OUT status='CANCELLED' avg=0.0 lots=2 comm=None
+         reason='позиция зарегистрирована; RECOVERY: no_price'
+[3] IN  status='CANCELLED' side=None avg=100.0 lots=5 comm=None
+     OUT status='UNCERTAIN' avg=0.0 lots=5 comm=None
+         reason='позднее исполнение применено к позиции (+3 лот., итого 5); identity/metadata contradiction of repeat'
+
+=================================== FAILURES ===================================
+E   AssertionError: assert ('UNCERTAIN' == 'CANCELLED'
+      
+      - CANCELLED
+      + UNCERTAIN)
+/home/z/my-project/audit_v3/work/trace_tmp/test_p0_batch2_late_execution.py:470: AssertionError: assert ('UNCERTAIN' == 'CANCELLED'
+=========================== short test summary info ============================
+FAILED test_v3_diag_trace_tmp.py::test_trace_integration - AssertionError: as...
+1 failed in 0.42s

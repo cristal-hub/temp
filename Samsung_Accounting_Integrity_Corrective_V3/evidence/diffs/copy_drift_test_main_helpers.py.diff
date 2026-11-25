@@ -1,0 +1,22 @@
+--- a/root_canonical/test_main_helpers.py
++++ b/tests_stale_copy/test_main_helpers.py
+@@ -26,8 +26,7 @@
+     async def get_positions(self):
+         return self.positions
+ 
+-    async def get_sandbox_order_state(self, order_id, order_id_type=None):
+-        # ЭТАП 5Б: ЯВНЫЙ тип идентификатора в контракте GetOrderState.
++    async def get_sandbox_order_state(self, order_id):
+         return self.order_states.get(order_id)
+ 
+     async def get_instrument_info(self, figi):
+@@ -175,9 +174,6 @@
+     pos.state = PositionState.CLOSED
+     pos.executed_lots = qty
+     pos.execution_price = exit_price
+-    # v2.3.1-stage1 (ТЗ-5): имитация закрытия с РЕАЛЬНОЙ ценой из исполненного
+-    # close-ордера — именно так apply_close_execution выставляет маркер.
+-    pos.exit_price_confirmed = True
+     pos.close_reason = "TP"
+     pos.close_price_before_order = (
+         close_price_before_order if close_price_before_order is not None else exit_price

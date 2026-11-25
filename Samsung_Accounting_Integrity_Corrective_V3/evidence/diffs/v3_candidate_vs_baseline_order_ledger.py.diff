@@ -1,0 +1,97 @@
+--- a/canonical/order_ledger.py
++++ b/candidate/order_ledger.py
+@@ -20,6 +20,7 @@
+ import hashlib
+ import json
+ import logging
++import math
+ import os
+ from datetime import datetime, timezone
+ from typing import Dict, List, Optional
+@@ -38,6 +39,37 @@
+ NON_TERMINAL_STATUSES = {STATUS_INTENT, STATUS_SENT, STATUS_NEW, STATUS_PARTIALLYFILL, STATUS_UNCERTAIN}
+ DEAD_WITHOUT_EXECUTION = {STATUS_REJECTED, STATUS_CANCELLED, STATUS_EXPIRED}
+ 
++# === CORRECTIVE AUDIT V3 (FIX-ZERO-PRICE) ===
++# Валидность «подтверждённого» значения зависит от типа поля:
++#   * avg_exec_price — валидно ТОЛЬКО конечное ПОЛОЖИТЕЛЬНОЕ значение.
++#     Нулевая/отрицательная/неконечная величина НЕ является ценой
++#     исполнения: это отсутствие данных (брокер нередко возвращает
++#     executed_order_price=0 при lots_executed>0 для отменённых заявок).
++#     Записанное в реестре 0.0 не может блокировать позднее обогащение
++#     реальной ценой (ложный UNCERTAIN «0.0 -> реальная цена» — дефект,
++#     устранённый V3; ТЗ §5.1: «0.0 не должен ошибочно трактоваться как
++#     подтверждённая цена исполнения»).
++#   * commission — валидно любое КОНЕЧНОЕ неотрицательное значение:
++#     0.0 — ДОСТОВЕРНЫЙ реальный ноль брокера (семантика BUY AUDIT v1
++#     FIX-3 сохранена без изменений), NaN/Inf/отрицательное — невалидны.
++# Настоящие противоречия двух ДОСТОВЕРНЫХ значений (например,
++# 100.0 -> 200.0 на терминальной заявке) распознаются как прежде —
++# fail-closed защита НЕ ослабляется.
++def _valid_execution_price(value) -> bool:
++    try:
++        f = float(value)
++    except (TypeError, ValueError):
++        return False
++    return math.isfinite(f) and f > 0
++
++
++def _valid_commission(value) -> bool:
++    try:
++        f = float(value)
++    except (TypeError, ValueError):
++        return False
++    return math.isfinite(f) and f >= 0
++
+ RECORD_FIELDS = [
+     "timestamp_utc", "status", "order_id", "trade_id", "figi", "ticker",
+     "side", "requested_lots", "executed_lots", "lots_left",
+@@ -225,23 +257,36 @@
+                     record[_k] = _old
+             _prev_terminal = prev.get("status") in TERMINAL_STATUSES
+             for _k in ("avg_exec_price", "commission"):
++                # CORRECTIVE AUDIT V3 (FIX-ZERO-PRICE): конфликт распознаётся
++                # ТОЛЬКО между двумя ДОСТОВЕРНЫМИ значениями (валидность —
++                # по типу поля, см. _valid_execution_price/_valid_commission).
++                _valid = (_valid_execution_price if _k == "avg_exec_price"
++                          else _valid_commission)
+                 _new = fields.get(_k)
+                 _old = prev.get(_k)
+-                if _new is None:
+-                    # отсутствие данных в повторном отчёте НЕ затирает
+-                    # ранее подтверждённое значение
+-                    if _old is not None:
++                if _new is None or not _valid(_new):
++                    # отсутствие данных (или невалидное значение: 0.0-цена,
++                    # NaN/Inf) в повторном отчёте НЕ затирает ранее
++                    # подтверждённое значение и само не записывается
++                    if _old is not None and _valid(_old):
+                         record[_k] = _old
++                    else:
++                        record.pop(_k, None)
+                     continue
+-                if _old is None or not _prev_terminal:
+-                    continue
+-                try:
+-                    _fo, _fn = float(_old), float(_new)
+-                except (TypeError, ValueError):
+-                    _meta_conflicts.append(f"{_k} {_old}->{_new}")
+-                    record[_k] = _old
++                if _old is None or not _valid(_old) or not _prev_terminal:
++                    # новая достоверная цена/комиссия ОБОГАЩАЕТ запись:
++                    #   * прежних данных не было; ИЛИ
++                    #   * прежнее значение невалидно (например, legacy 0.0
++                    #     в avg_exec_price — «нулевая цена» не является
++                    #     подтверждённой ценой исполнения, обогащение
++                    #     реальной ценой — штатный сценарий ТЗ §5.1); ИЛИ
++                    #   * отчёт нетерминальный — кумулятивные средние
++                    #     легитимно уточняются (частичные исполнения).
+                     continue
+-                if abs(_fo - _fn) > 1e-9:
++                if abs(float(_old) - float(_new)) > 1e-9:
++                    # два достоверных РАЗЛИЧНЫХ значения на терминальной
++                    # заявке — настоящее противоречие: fail-closed,
++                    # прежнее значение сохраняется (защита не ослаблена)
+                     _meta_conflicts.append(f"{_k} {_old}->{_new}")
+                     record[_k] = _old
+             if _meta_conflicts:

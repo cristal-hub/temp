@@ -1,0 +1,48 @@
+--- a/canonical/execution.py
++++ b/candidate/execution.py
+@@ -193,6 +193,7 @@
+ #   работает как прежде) и классифицирует причину SL-выхода: SL / BE / TRAIL.
+ import json
+ import logging
++import math
+ from dataclasses import dataclass, field, asdict
+ from enum import Enum
+ from typing import Dict, List, Optional
+@@ -1250,7 +1251,19 @@
+             if ep is None or lots_executed <= 0 or lot_size <= 0:
+                 return None
+             total = float(ep.units) + float(ep.nano) / 1e9
+-            return total / (lots_executed * lot_size)
++            price = total / (lots_executed * lot_size)
++            # CORRECTIVE AUDIT V3 (FIX-ZERO-PRICE, ТЗ §5.1/§5.4): цена
++            # исполнения обязана быть конечной и ПОЛОЖИТЕЛЬНОЙ. Нулевой
++            # расчёт (брокер возвращает executed_order_price=0 при
++            # lots_executed>0 — например, для отменённой заявки) — это
++            # ОТСУТСТВИЕ цены, а не подтверждённая стоимость: возвращаем
++            # None, чтобы реестр/позиция не закрепляли 0.0 как достоверную
++            # цену и поздняя реальная цена могла обогатить запись без
++            # ложного конфликта реестра (дефект «0.0 -> реальная цена ->
++            # UNCERTAIN», воспроизведён трассировкой в V3).
++            if not math.isfinite(price) or price <= 0:
++                return None
++            return price
+         except Exception:
+             return None
+ 
+@@ -1260,11 +1273,16 @@
+         # значение брокера («комиссия реально нулевая»), оно отличается от
+         # отсутствующего значения (None). Прежнее поведение (0 -> None)
+         # теряло факт нулевой комиссии и подменяло её модельной.
++        # CORRECTIVE AUDIT V3 (ТЗ §5.4): NaN/±Inf — невалидные данные,
++        # в реестр/State/CSV не попадают: трактуются как отсутствие
++        # подтверждённого значения (None).
+         try:
+             ec = getattr(state, "executed_commission", None)
+             if ec is None:
+                 return None
+             value = abs(float(ec.units) + float(ec.nano) / 1e9)
++            if not math.isfinite(value):
++                return None
+             return value
+         except Exception:
+             return None

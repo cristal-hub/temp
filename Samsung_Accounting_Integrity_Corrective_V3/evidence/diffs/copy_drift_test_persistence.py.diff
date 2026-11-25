@@ -1,0 +1,32 @@
+--- a/root_canonical/test_persistence.py
++++ b/tests_stale_copy/test_persistence.py
+@@ -136,9 +136,6 @@
+         import json, os, sys
+         sys.path.insert(0, r"{os.getcwd()}")
+         from decimal import Decimal
+-        import tests.conftest  # SDK-заглушки из tests/conftest.py (no-op при реальном SDK)
+-        from tests.conftest import _install_stubs
+-        _install_stubs()
+         import main
+         from execution import ExecutionMonitor
+         from risk_manager import RiskManager
+@@ -189,9 +186,6 @@
+     save_script = textwrap.dedent(f"""
+         import sys, os
+         sys.path.insert(0, r"{os.getcwd()}")
+-        import tests.conftest  # SDK-заглушки из tests/conftest.py (no-op при реальном SDK)
+-        from tests.conftest import _install_stubs
+-        _install_stubs()
+         import main
+         from execution import ExecutionMonitor
+         from risk_manager import RiskManager
+@@ -218,9 +212,6 @@
+     load_script = textwrap.dedent(f"""
+         import sys, os
+         sys.path.insert(0, r"{os.getcwd()}")
+-        import tests.conftest  # SDK-заглушки из tests/conftest.py (no-op при реальном SDK)
+-        from tests.conftest import _install_stubs
+-        _install_stubs()
+         import main
+         from execution import ExecutionMonitor
+         from risk_manager import RiskManager

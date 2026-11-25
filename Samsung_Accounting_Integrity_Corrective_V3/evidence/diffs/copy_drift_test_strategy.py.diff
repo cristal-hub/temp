@@ -1,0 +1,28 @@
+--- a/root_canonical/test_strategy.py
++++ b/tests_stale_copy/test_strategy.py
+@@ -143,9 +143,6 @@
+     Повторный вызов на той же свече не должен засчитывать
+     второе подтверждение смены режима.
+     """
+-    monkeypatch.setattr(config, "ADX_TREND_THRESHOLD", 25)
+-    monkeypatch.setattr(config, "ADX_HYSTERESIS_CANDLES", 2)
+-
+     state = {"value": 20.0}
+     install_fake_adx(monkeypatch, state)
+ 
+@@ -171,7 +168,6 @@
+     При CONSERVATIVE смена режима происходит после двух
+     последовательных новых свечей с подтверждением.
+     """
+-    monkeypatch.setattr(config, "ADX_TREND_THRESHOLD", 25)
+     monkeypatch.setattr(config, "ADX_HYSTERESIS_CANDLES", 2)
+ 
+     state = {"value": 20.0}
+@@ -200,7 +196,6 @@
+     Если кандидат на смену режима отменяется,
+     незавершённая серия подтверждений сбрасывается.
+     """
+-    monkeypatch.setattr(config, "ADX_TREND_THRESHOLD", 25)
+     monkeypatch.setattr(config, "ADX_HYSTERESIS_CANDLES", 2)
+ 
+     state = {"value": 20.0}

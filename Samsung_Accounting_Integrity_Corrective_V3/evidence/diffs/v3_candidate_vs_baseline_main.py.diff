@@ -1,0 +1,27 @@
+--- a/canonical/main.py
++++ b/candidate/main.py
+@@ -549,6 +549,7 @@
+ import csv
+ import json
+ import logging
++import math
+ import os
+ import uuid
+ from datetime import datetime, timezone
+@@ -3365,6 +3366,16 @@
+         price_value = float(exec_price) if exec_price is not None else None
+     except (TypeError, ValueError):
+         return False
++    # CORRECTIVE AUDIT V3 (ТЗ §5.4, NaN/Infinity): float() успешно парсит
++    # NaN и ±Infinity, поэтому конечность проверяется ЯВНО. Невалидное
++    # значение делает операцию ЦЕЛИКОМ неудачной (та же семантика, что
++    # и непарсируемое значение в FIX-1): объект позиции не изменяется,
++    # частичная мутация невозможна, невалидные данные не попадают
++    # в State, Ledger или CSV.
++    if commission_value is not None and not math.isfinite(commission_value):
++        return False
++    if price_value is not None and not math.isfinite(price_value):
++        return False
+ 
+     # --- 2. ПОДГОТОВКА новых значений (без изменения объекта позиции) ---
+     staged = {}

@@ -1,0 +1,71 @@
+--- a/root_canonical/test_fail_closed.py
++++ b/tests_stale_copy/test_fail_closed.py
+@@ -26,8 +26,7 @@
+         # Возвращаем пустой словарь — trading_cycle выйдет на «нет цен».
+         return {}
+ 
+-    async def get_sandbox_order_state(self, order_id, order_id_type=None):
+-        # ЭТАП 5Б: ЯВНЫЙ тип идентификатора в контракте GetOrderState.
++    async def get_sandbox_order_state(self, order_id):
+         return self.order_states.get(order_id)
+ 
+     def is_uncertain(self):
+@@ -56,7 +55,7 @@
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_trading_cycle_blocks_entry_on_positions_error(monkeypatch):
++async def test_trading_cycle_blocks_entry_on_positions_error():
+     """
+     Если get_positions() вернул None перед входом — новые входы запрещены.
+     get_last_prices возвращает {} — trading_cycle выходит на «Нет цен» до проверки positions.
+@@ -64,9 +63,7 @@
+     """
+     client = FakeClient(positions=None, raise_on_positions=True)
+     mon = ExecutionMonitor(client)
+-    # Изоляция: раньше прямое присваивание main.reconcile_done = True
+-    # переживало тест. monkeypatch восстанавливает значение автоматически.
+-    monkeypatch.setattr(main, "reconcile_done", True)
++    main.reconcile_done = True
+     # reconcile при ошибке сохраняет UNCERTAIN и сбрасывает reconcile_done.
+     await main.reconcile(client, mon)
+     assert client.uncertain_state is True
+@@ -74,19 +71,18 @@
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_trading_cycle_exits_on_no_prices(monkeypatch):
++async def test_trading_cycle_exits_on_no_prices():
+     """Если цен нет — цикл корректно выходит, не отправляя заявок."""
+     client = FakeClient(positions={})
+     mon = ExecutionMonitor(client)
+-    # Изоляция: раньше ручное сохранение/восстановление top_instruments
+-    # через try/finally; кроме того, цикл завершался _save_state_checked
+-    # с rm=None — флаг state_save_failed переживал тест и блокировал входы
+-    # в СЛЕДУЮЩИХ тестах (test_main::trading_cycle). monkeypatch
+-    # восстанавливает оба значения автоматически.
+-    monkeypatch.setattr(main, "top_instruments", [])
+-    monkeypatch.setattr(main, "state_save_failed", False)
+-    # Не должно падать и не должно отправлять заявок.
+-    await main.trading_cycle(client, None, None, mon)
++    import main as m
++    old_top = m.top_instruments
++    m.top_instruments = []
++    try:
++        # Не должно падать и не должно отправлять заявок.
++        await main.trading_cycle(client, None, None, mon)
++    finally:
++        m.top_instruments = old_top
+ 
+ 
+ @pytest.mark.asyncio
+@@ -165,9 +161,6 @@
+     pos.close_reason = "TP"
+     pos.close_price_before_order = 101.0
+     pos.close_requested_at = "2026-01-01T00:00:00+00:00"
+-    # v2.3.1-stage1 (ТЗ-5): цена 101.0 — из исполненного close-ордера
+-    # (маркер как у apply_close_execution), P&L рассчитывается.
+-    pos.exit_price_confirmed = True
+     pos.actual_commission = 0.5          # выход — фактическая
+     pos.entry_actual_commission = None   # вход — модельная
+ 
