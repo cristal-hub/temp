@@ -1,0 +1,202 @@
+ERROR    root:main.py:1080 [state] _save_state не удался — новые входы заблокированы до успешного сохранения
+ERROR    root:main.py:1080 [state] _save_state не удался — новые входы заблокированы до успешного сохранения
+ERROR    root:main.py:1080 [state] _save_state не удался — новые входы заблокированы до успешного сохранения
+ERROR    root:main.py:1080 [state] _save_state не удался — новые входы заблокированы до успешного сохранения
+ERROR    root:main.py:1080 [state] _save_state не удался — новые входы заблокированы до успешного сохранения
+ERROR    root:main.py:2028 [close] TEST: state=None (order_request_id=0717e6d6-25b6-4fc6-9394-0615e2c6af45) — UNCERTAIN. Повторная отправка запрещена.
+ERROR    root:main.py:2028 [close] TEST: state=None (order_request_id=38879786-d672-46a5-87c9-046ef06498c6) — UNCERTAIN. Повторная отправка запрещена.
+ERROR    root:main.py:2028 [close] TEST: state=None (order_request_id=b2bf56e4-60c6-419e-abde-f77e2f1d3118) — UNCERTAIN. Повторная отправка запрещена.
+ERROR    root:main.py:2028 [close] TEST: state=None (order_request_id=dadbfee8-8512-42fb-9575-7edeaceace10) — UNCERTAIN. Повторная отправка запрещена.
+ERROR    root:main.py:3162 [register] TEST: state.json НЕ сохранён — подтверждение регистрации заявки oid-G в реестр НЕ пишется (позиция в памяти; при перезапуске заявка будет доведена до регистрации повторным восстановлением)
+ERROR    root:main.py:3162 [register] TEST: state.json НЕ сохранён — подтверждение регистрации заявки oid-G в реестр НЕ пишется (позиция в памяти; при перезапуске заявка будет доведена до регистрации повторным восстановлением)
+ERROR    root:main.py:3162 [register] TEST: state.json НЕ сохранён — подтверждение регистрации заявки oid-G в реестр НЕ пишется (позиция в памяти; при перезапуске заявка будет доведена до регистрации повторным восстановлением)
+ERROR    root:main.py:3162 [register] TEST: state.json НЕ сохранён — подтверждение регистрации заявки oid-G в реестр НЕ пишется (позиция в памяти; при перезапуске заявка будет доведена до регистрации повторным восстановлением)
+ERROR    root:main.py:3162 [register] TEST: state.json НЕ сохранён — подтверждение регистрации заявки oid-G в реестр НЕ пишется (позиция в памяти; при перезапуске заявка будет доведена до регистрации повторным восстановлением)
+ERROR    root:main.py:3439 [poll] TEST: заявка u3 с НЕИЗВЕСТНОЙ стороной имеет признаки исполнения (status=CANCELLED, lots_executed=2) — остаётся UNCERTAIN, требуется разрешение оператором; BUY заблокированы, позиции продолжают мониториться
+ERROR    root:main.py:4220 MVID: реестр заявок недоступен — вход заблокирован (fail-closed)
+ERROR    root:main.py:4287 TEST: ЧАСТИЧНОЕ исполнение покупки — отмена остатка (order_id=0b5d2821-b807-406b-b558-734e5ba984e3)
+ERROR    root:main.py:4287 TEST: ЧАСТИЧНОЕ исполнение покупки — отмена остатка (order_id=65735c87-afe4-4761-829f-0cbe4fc7fd11)
+ERROR    root:main.py:4287 TEST: ЧАСТИЧНОЕ исполнение покупки — отмена остатка (order_id=6e1728f5-3546-4525-9a49-0d9d202e5970)
+ERROR    root:main.py:4287 TEST: ЧАСТИЧНОЕ исполнение покупки — отмена остатка (order_id=e9b4195f-54ac-4bbf-8a81-3e6b8982846e)
+ERROR    root:order_ledger.py:212 [ledger] invalid INTENT: missing identity field or invalid side
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=1). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=1). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=1). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=1). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=1). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=1). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=1). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=1). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=2). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=2). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=3). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=3). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=3). Кэша нет.
+ERROR    root:screener.py:116 [screener] Скрининг не удался (errors_count=3). Кэша нет.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=2, processed=2). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=2, processed=2). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=3, processed=3). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=3, processed=3). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=3, processed=3). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 1: неполное сканирование (errors=3, processed=3). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=1, processed=1). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=2, processed=2). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=2, processed=2). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=3, processed=3). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=3, processed=3). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=3, processed=3). Результат не используется для новых входов.
+ERROR    root:screener.py:76 [screener] Попытка 2: неполное сканирование (errors=3, processed=3). Результат не используется для новых входов.
+ERROR test_execution.py
+FAILED test_b2_csv_recovery.py::test_a_actual_commission_recovered_after_csv_write
+FAILED test_b2_csv_recovery.py::test_b_execution_price_recovered_after_price_unknown_csv
+FAILED test_b2_csv_recovery.py::test_c_commission_first_then_price
+FAILED test_b2_csv_recovery.py::test_d_price_first_then_commission
+FAILED test_b2_csv_recovery.py::test_e_repeated_identical_report_does_not_change_result_twice
+FAILED test_b2_csv_recovery.py::test_f_late_data_after_restart_updates_previous_trade
+FAILED test_b2_csv_recovery.py::test_g_cumulative_pnl_recomputed_for_subsequent_trades
+FAILED test_b2_csv_recovery.py::test_i_conflicting_price_does_not_overwrite_confirmed_price
+FAILED test_b2_csv_recovery.py::test_j_conflicting_commission_does_not_overwrite_confirmed_commission
+FAILED test_b2_csv_recovery.py::test_l_failed_csv_update_does_not_corrupt_file
+FAILED test_b2_csv_recovery.py::test_m_missing_or_ambiguous_trade_id_does_not_update_foreign_trade
+FAILED test_b2_csv_recovery.py::test_n_full_process_repeat_gives_same_result_as_single
+FAILED test_b2_v4_accounting_consistency.py::test_v4_a_cumulative_follows_close_chronology_not_file_order
+FAILED test_b2_v4_accounting_consistency.py::test_v4_b_late_commission_change_recomputes_subsequent_cumulative
+FAILED test_b2_v4_accounting_consistency.py::test_v4_c_identical_exit_times_stable_tiebreaker
+FAILED test_b2_v4_accounting_consistency.py::test_v4_e_new_position_same_figi_keeps_recovery_task
+FAILED test_b2_v4_accounting_consistency.py::test_v4_f_two_trades_same_figi_reports_not_mixed
+FAILED test_b2_v4_accounting_consistency.py::test_v4_g_recovery_task_survives_restart
+FAILED test_b2_v4_accounting_consistency.py::test_v4_h_identity_conflict_fail_closed
+FAILED test_b2_v4_accounting_consistency.py::test_v4_i_csv_error_keeps_task_and_file_intact
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_a_lost_sell_response_keeps_request_timestamp
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_b_cumulative_follows_saved_request_timestamps
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_c_request_timestamp_survives_restart
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_d_legacy_state_restores_ts_from_cursor
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_e_recovery_task_trade_id_mismatch_fail_closed
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_f_recovery_task_figi_mismatch_fail_closed
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_g_cursor_identity_mismatch_fail_closed
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_h_duplicate_trade_id_conflicting_tasks_fail_closed
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_i_row_identity_mismatch_blocks_update
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_j_valid_task_after_restart_completes_normally
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_a_reconcile_keeps_initial_request_timestamp
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_b_missing_position_ts_restored_from_own_cursor
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_c_no_historical_ts_left_absent_legacy_policy
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_d_cross_trade_timestamp_isolated_and_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_e_new_cursor_missing_trade_id_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_f_new_cursor_missing_figi_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_g_new_cursor_missing_side_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_h_new_cursor_wrong_identity_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_i_valid_new_cursor_recovery_completes
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_j_valid_legacy_cursor_recovery_completes
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_k_legacy_cursor_contradiction_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_l_conflict_task_stays_blocked_after_restart
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_m_empty_close_reason_no_indexerror_fallback
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_n_empty_close_reason_keeps_known_reason
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_p_empty_reason_reconcile_uncertain_no_side_effects
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_a_legacy_cursor_without_marker_uses_legacy_policy
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_b_supported_version_strict_check_passes
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_c_corrupt_version_string_blocked_not_legacy
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_d_unknown_numeric_version_blocked
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[  ]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[0_0]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[0_1]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[2.0]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[False]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[None]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_f_invalid_version_task_survives_restart_no_side_effects
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_g_confirmed_alt_cursor_timestamp_restored
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_h_alt_cursor_foreign_trade_id_rejected
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_i_alt_cursor_foreign_figi_rejected
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_j_alt_cursor_wrong_side_or_order_id_rejected
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_k_alt_cursor_bad_version_rejected
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_l_alt_cursor_conflict_safe_none_legacy_policy
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_m_two_trades_same_figi_no_timestamp_mixing
+FAILED test_buy_registration_fix2.py::test_g_primary_buy_unsaved_state
+FAILED test_buy_registration_fix2_FIX2_snapshot.py::test_g_primary_buy_unsaved_state
+FAILED test_p0_batch2_late_execution.py::test_integration_trading_cycle_partial_cancel_recovery_open_late_lots
+FAILED test_p0_batch2_late_execution.py::test_n1_no_premotion_while_order_alive
+FAILED test_p0_batch2_late_execution.py::test_n1_promotion_only_at_terminal_syncs_final_quantity
+FAILED test_p0_batch2_late_execution.py::test_n4_late_growth_after_terminal_cancelled_actually_repolled
+FAILED test_p0_batch2_late_execution.py::test_p03_1_repeated_buy_report_does_not_restore_sold_lots
+FAILED test_p0_batch2_late_execution.py::test_p03_2_stale_buy_report_contradiction_blocks_buy
+FAILED test_p0_batch2_late_execution.py::test_p04_reconcile_before_poll_no_reapply_of_late_lots
+FAILED test_p0_batch2_late_execution.py::test_p05_1_first_ambiguous_growth_sets_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_2_repeated_same_lots_poll_keeps_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_3_failed_or_contradictory_reconcile_keeps_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_4_successful_reconcile_allows_resolution_no_side_effects
+FAILED test_p0_sell_id_fixes.py::test_16_request_lookup_unavailable_fails_closed
+FAILED test_persistence.py::test_second_process_restores_state
+FAILED test_persistence.py::test_subprocess_saves_state_then_killed
+FAILED test_screener.py::test_screener_cache
+FAILED test_screener.py::test_screener_error_does_not_return_stale_cache
+FAILED test_screener.py::test_screener_filters_low_turnover
+FAILED test_screener.py::test_screener_partial_scan_returns_none
+FAILED test_screener.py::test_screener_returns_top_n
+FAILED test_screener.py::test_screener_valid_result_less_than_10
+FAILED test_strategy.py::test_adx_candidate_reversal_resets_streak
+FAILED test_strategy.py::test_adx_flips_after_two_new_candles
+FAILED test_strategy.py::test_adx_same_candle_does_not_increase_streak
+FAILED tests/test_buy_registration_fix2 (1).py::test_g_primary_buy_unsaved_state
+FAILED tests/test_buy_registration_fix2.py::test_g_primary_buy_unsaved_state
+FAILED tests/test_buy_registration_fix2_FIX2_snapshot.py::test_g_primary_buy_unsaved_state
+FAILED tests/test_execution.py::test_partial_sell_then_second_sell_uses_own_cursor
+FAILED tests/test_execution.py::test_terminal_partial_sell_reopens_remaining_position
+FAILED tests/test_fail_closed.py::test_mixed_commission_source
+FAILED tests/test_main.py::test_trading_cycle_not_fill_but_executed_creates_position
+FAILED tests/test_main_helpers.py::test_process_closing_actual_commission
+FAILED tests/test_main_helpers.py::test_process_closing_cumulative_net_pnl
+FAILED tests/test_main_helpers.py::test_process_closing_entry_and_exit_sum_to_total
+FAILED tests/test_main_helpers.py::test_process_closing_mixed_commission_is_mixed
+FAILED tests/test_main_helpers.py::test_process_closing_model_commission
+FAILED tests/test_main_helpers.py::test_process_closing_slippage_percent
+FAILED tests/test_p0_batch2_late_execution.py::test_integration_trading_cycle_partial_cancel_recovery_open_late_lots
+FAILED tests/test_p0_batch2_late_execution.py::test_n1_no_premotion_while_order_alive
+FAILED tests/test_p0_batch2_late_execution.py::test_n1_promotion_only_at_terminal_syncs_final_quantity
+FAILED tests/test_p0_batch2_late_execution.py::test_n3_unknown_figi_execution_not_registered_global_block
+FAILED tests/test_p0_batch2_late_execution.py::test_n4_late_growth_after_terminal_cancelled_actually_repolled
+FAILED tests/test_p0_batch2_late_execution.py::test_p03_1_repeated_buy_report_does_not_restore_sold_lots
+FAILED tests/test_p0_batch2_late_execution.py::test_p03_2_stale_buy_report_contradiction_blocks_buy
+FAILED tests/test_p0_batch2_late_execution.py::test_p04_reconcile_before_poll_no_reapply_of_late_lots
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_1_first_ambiguous_growth_sets_uncertain
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_2_repeated_same_lots_poll_keeps_uncertain
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_3_failed_or_contradictory_reconcile_keeps_uncertain
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_4_successful_reconcile_allows_resolution_no_side_effects
+FAILED tests/test_p0_defect_fixes.py::test_defect1_unavailable_portfolio_with_confirmed_lots_registers
+FAILED tests/test_p0_defect_fixes.py::test_defect2_only_executed_quantity_registered
+FAILED tests/test_p0_defect_fixes.py::test_defect4_unknown_side_resolves_only_without_execution
+FAILED tests/test_p0_defect_fixes.py::test_defect8_poll_fill_zero_lots_stays_uncertain
+FAILED tests/test_p0_defect_fixes.py::test_poll_registers_before_cancel
+FAILED tests/test_p0_defect_fixes.py::test_scenario_14_fill_zero_lots_resolves_after_reconnect
+FAILED tests/test_p0_defect_fixes.py::test_scenario_16_registered_partial_not_added_again
+FAILED tests/test_p0_defect_fixes.py::test_scenario_1_partial_buy_cancelled_portfolio_silent
+FAILED tests/test_p0_defect_fixes.py::test_scenario_2_cancelled_with_executed_lots
+FAILED tests/test_p0_defect_fixes.py::test_scenario_3_expired_with_executed_lots
+FAILED tests/test_p0_defect_fixes.py::test_scenario_4_repeated_poll_no_quantity_doubling
+FAILED tests/test_p0_defect_fixes.py::test_scenario_5_late_execution_after_cancel
+FAILED tests/test_p0_defect_fixes.py::test_scenario_6_new_order_regularly_polled_reaches_timeout
+FAILED tests/test_persistence.py::test_second_process_restores_state
+FAILED tests/test_persistence.py::test_subprocess_saves_state_then_killed
+FAILED tests/test_screener.py::test_screener_cache
+FAILED tests/test_screener.py::test_screener_error_does_not_return_stale_cache
+FAILED tests/test_screener.py::test_screener_filters_low_turnover
+FAILED tests/test_screener.py::test_screener_partial_scan_returns_none
+FAILED tests/test_screener.py::test_screener_returns_top_n
+FAILED tests/test_screener.py::test_screener_valid_result_less_than_10
+FAILED tests/test_strategy.py::test_adx_candidate_reversal_resets_streak
+FAILED tests/test_strategy.py::test_adx_flips_after_two_new_candles
+FAILED tests/test_strategy.py::test_adx_same_candle_does_not_increase_streak
