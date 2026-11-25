@@ -1,0 +1,539 @@
+--- a/main.py
++++ b/main.py
+@@ -522,7 +522,10 @@
+ from risk_manager import RiskManager
+ from strategy import StrategyManager
+ from tinkoff_client import TinkoffClient, PositionData
+-from execution import ExecutionMonitor, PositionState, ACTIVE_STATES
++from execution import (
++    ExecutionMonitor, PositionState, ACTIVE_STATES,
++    TrackedPosition,  # v2.3.7-stage1 (B2 V4): восстановление снимков recovery-задач
++)
+ from screener import Screener
+ 
+ if config.ENABLE_TELEGRAM:
+@@ -1096,6 +1099,10 @@
+             # позицией по тому же FIGI; используется guard
+             # register_executed_buy для запрета «воскрешения».
+             "closed_entry_order_ids": export.get("closed_entry_order_ids", []),
++            # v2.3.7-stage1 (B2 V4): незавершённые recovery-задачи закрытых
++            # сделок переживают перезапуск (снимки позиций, заменённых
++            # register()/register_recovery() по тому же FIGI).
++            "pending_csv_recoveries": export.get("pending_csv_recoveries", []),
+             "monitoring_error": monitor.monitoring_error,
+             "risk": rm.export_state(),
+             # Этап 5: краткий срез реестра заявок для диагностики
+@@ -1150,6 +1157,11 @@
+             # закрытых входных заявок. Старый state.json без ключа
+             # восстанавливается с пустым списком (обратная совместимость).
+             "closed_entry_order_ids": data.get("closed_entry_order_ids", []),
++            # v2.3.7-stage1 (B2 V4): незавершённые recovery-задачи закрытых
++            # сделок. Старый state.json без ключа -> пустой список
++            # (обратная совместимость); повреждённые записи отбрасываются
++            # в import_state с журналом (fail-closed по записи).
++            "pending_csv_recoveries": data.get("pending_csv_recoveries", []),
+         })
+         risk = data.get("risk", {})
+         if isinstance(risk, dict):
+@@ -2711,7 +2723,17 @@
+             "execution_price": f"{pos.entry_price:.4f}",
+             "exit_reason": pos.close_reason or "",
+             "exit_price": exit_price_str,
+-            "exit_time": datetime.now(timezone.utc).isoformat(),
++            # v2.3.7-stage1 (V4 Problem №1): exit_time — АВТОРИТЕТНОЕ время
++            # закрытия для хронологического пересчёта cumulative: фиксируется
++            # время ЗАПРОСА закрытия (close_requested_at: триггер SL/TP /
++            # отправка SELL) — оно не зависит от момента записи строки и
++            # от порядка обхода позиций в цикле. Фиксируется ОДИН раз и
++            # recovery-обновлениями не меняется. Для закрытий без своей
++            # заявки (B3) и позиций без close_requested_at — момент записи
++            # строки (единственная доступная оценка; НЕ скрытая подстановка
++            # при пересчёте).
++            "exit_time": pos.close_requested_at
++            or datetime.now(timezone.utc).isoformat(),
+             "commission_rub": commission_str,
+             "commission_source": commission_source,
+             "actual_commission_rub": actual_commission_str,
+@@ -2814,6 +2836,80 @@
+                 f"[csv-recovery] {pos.ticker}: сбой восстановления: "
+                 f"{type(exc).__name__}: {exc} — учёт и CSV не изменены")
+ 
++    # v2.3.7-stage1 (B2 V4 — PERSISTENT LATE CSV RECOVERY): восстановление
++    # незавершённых задач, архивированных при замене закрытой позиции новой
++    # по тому же FIGI (register()/register_recovery()). Источник задач —
++    # НЕ monitor.positions[figi], а персистентный архив (state.json):
++    # прежний объект позиции в positions больше не содержится, но его
++    # CSV-строка всё ещё должна получить поздние фактические данные.
++    # Каждая задача обрабатывается по СНИМКУ СТАРОЙ сделки:
++    #   * опрашивается ЕЁ собственная close-заявка (снимок хранит обе
++    #     ссылки — клиентский UUID и биржевой ID); заявка новой позиции
++    #     не опрашивается никогда;
++    #   * объект восстанавливается из снимка (TrackedPosition.from_dict)
++    #     как ОТСОЕДИНЁННЫЙ — в monitor.positions не возвращается,
++    #     лоты/состояние/учёт новой позиции не затрагиваются;
++    #   * та же семантика fail-closed (_recover_late_csv_metadata):
++    #     противоречие отчёта замороженному cursor'у — изменений нет;
++    #   * задача удаляется ТОЛЬКО при завершённом восстановлении (в строке
++    #     подтверждены и цена, и фактическая комиссия) — ТЗ №10; новая
++    #     позиция по тому же FIGI удаление задачи не инициирует.
++    for rec in list(getattr(monitor, "pending_csv_recoveries", []) or []):
++        trade_id = str(rec.get("trade_id") or "")
++        ticker = str(rec.get("ticker") or "?")
++        if not trade_id:
++            continue
++        try:
++            task_pos = TrackedPosition.from_dict(rec.get("position") or {})
++        except Exception as exc:
++            # Снимок невосстановим (повреждён в памяти): задача непригодна,
++            # сохранение порождало бы вечные сбои; ни одна строка CSV и ни
++            # один учётный объект не затронуты (fail-closed).
++            logging.error(
++                f"[csv-recovery] {ticker}: снимок задачи trade_id={trade_id} "
++                f"невосстановим ({type(exc).__name__}: {exc}) — задача "
++                f"удалена, CSV не изменён (fail-closed)")
++            research_logger.log_event("CSV_RECOVERY_TASK_DROPPED", {
++                "trade_id": trade_id, "figi": rec.get("figi"),
++                "reason": "snapshot_unrestorable",
++            })
++            if rec in monitor.pending_csv_recoveries:
++                monitor.pending_csv_recoveries.remove(rec)
++            continue
++        try:
++            await _recover_late_csv_metadata(client, task_pos)
++        except Exception as exc:
++            logging.error(
++                f"[csv-recovery] {ticker}: сбой восстановления архивной "
++                f"задачи trade_id={trade_id}: {type(exc).__name__}: {exc} "
++                f"— учёт и CSV не изменены")
++            continue
++        # Снимок задачи синхронизируется с рабочим состоянием (обогащение
++        # cursor'а поздними метаданными) — тогда конфликт ЛЮБОГО позднего
++        # отчёта с уже подтверждённым значением обнаружится и после
++        # перезапуска (та же защита, что у живых позиций в state.json).
++        try:
++            rec["position"] = task_pos.to_dict()
++        except Exception:
++            pass  # снимок остаётся прежним — recovery идемпотентен
++        # Завершение задачи: в строке подтверждены И цена, И фактическая
++        # комиссия (критерий совпадает с самоограничением опроса v3).
++        find_status, rec_row = research_logger.find_trade_row(trade_id)
++        if find_status == "found" and rec_row is not None:
++            rec_price = str(rec_row.get("exit_price") or "").strip()
++            rec_comm = str(rec_row.get("actual_commission_rub") or "").strip()
++            if rec_price and rec_comm:
++                if rec in monitor.pending_csv_recoveries:
++                    monitor.pending_csv_recoveries.remove(rec)
++                logging.info(
++                    f"[csv-recovery] {ticker}: задача trade_id={trade_id} "
++                    f"завершена (цена и фактическая комиссия подтверждены "
++                    f"в CSV) — удалена из очереди восстановления")
++                research_logger.log_event("CSV_RECOVERY_TASK_COMPLETED", {
++                    "trade_id": trade_id, "figi": rec.get("figi"),
++                    "ticker": rec.get("ticker"),
++                })
++
+ 
+ # ============================================================
+ # ЭТАП 5: ЕДИНАЯ ТОЧКА РЕГИСТРАЦИИ ИСПОЛНЕННОЙ ПОКУПКИ,
+--- a/execution.py
++++ b/execution.py
+@@ -305,6 +305,17 @@
+         self.positions: Dict[str, TrackedPosition] = {}
+         self.monitoring_error = False
+         self.closed_entry_order_ids: List[str] = []
++        # v2.3.7-stage1 (B2 V4 — PERSISTENT LATE CSV RECOVERY):
++        # незавершённые задачи восстановления поздних метаданных CSV.
++        # monitor.positions[figi] — НЕ единственный источник таких задач:
++        # register()/register_recovery() заменяют CLOSED-запись новой
++        # позицией того же FIGI, и прежний объект перестаёт попадать в
++        # recovery-цикл, а поздний отчёт брокера больше не доходит до
++        # его CSV-строки. Каждая задача — снимок позиции (pos.to_dict()),
++        # восстанавливаемый через TrackedPosition.from_dict; персистентен
++        # через export_state/import_state (state.json). Записи удаляются
++        # ТОЛЬКО при завершённом восстановлении (см. main.process_closing).
++        self.pending_csv_recoveries: List[dict] = []
+ 
+     def _archive_closed_entry_order(self, pos: TrackedPosition) -> None:
+         """Сохраняет признак закрытой сделки (entry_order_id) перед
+@@ -316,6 +327,61 @@
+             # Дополнительный этап: без обрезки архива — вытесненный признак
+             # закрытой сделки терял защиту guard'а от «воскрешения».
+ 
++    def archive_pending_csv_recovery(self, pos: TrackedPosition) -> None:
++        """v2.3.7-stage1 (B2 V4): сохраняет незавершённую recovery-задачу
++        закрытой сделки ПЕРЕД тем, как register()/register_recovery()
++        заменят её новой позицией того же FIGI.
++
++        Условие архивации (консервативное, только по данным позиции):
++          CLOSED + logged (CSV-строка записана) + стабильный trade_id +
++          ссылка на СВОЮ close-заявку (close_order_request_id — клиентский
++          UUID / close_order_id — биржевой ID). Полнота строки CSV здесь
++          сознательно НЕ проверяется (монитор не читает журнал): лишние
++          задачи отбрасываются recovery-проходом после первой же проверки
++          строки; незавершённые — остаются до подтверждения обоих
++          фактических значений.
++
++        Не архивируются: незалогированные закрытия (строки ещё нет —
++        восстанавливать нечего) и B3-внешние закрытия без своей SELL
++        (опрашивать нечего; B3 не меняется).
++
++        Задача содержит ПОЛНЫЙ снимок позиции (pos.to_dict()): trade_id,
++        ОБЕ ссылки на СВОЮ close-заявку и per-order cursor — идентичность
++        отчёта и принадлежность заявки проверяются по СНИМКУ СТАРОЙ
++        сделки; заявка новой позиции не опрашивается никогда.
++        Дедуп по стабильному trade_id: повторная архивация той же сделки
++        не создаёт вторую задачу."""
++        if pos is None or pos.state != PositionState.CLOSED or not pos.logged:
++            return
++        trade_id = str(getattr(pos, "trade_id", "") or "")
++        if not trade_id:
++            # Строка со случайным trade_id надёжно не идентифицируется —
++            # восстановление невозможно (fail-closed, как в recovery).
++            return
++        if not (pos.close_order_id or getattr(pos, "close_order_request_id", None)):
++            # Нет ссылки на СВОЮ close-заявку (например, B3-внешнее
++            # закрытие): опрос невозможен — задача не создаётся.
++            return
++        if any(rec.get("trade_id") == trade_id
++               for rec in self.pending_csv_recoveries):
++            return  # уже в очереди (дедуп по стабильному trade_id)
++        self.pending_csv_recoveries.append({
++            "version": 1,
++            "trade_id": trade_id,
++            "figi": pos.figi,
++            "ticker": pos.ticker,
++            "reason": "position_replaced_same_figi",
++            # Полный JSON-безопасный снимок позиции (asdict): при recovery
++            # восстанавливается через TrackedPosition.from_dict — в
++            # monitor.positions НЕ возвращается (учёт новой позиции
++            # не затрагивается).
++            "position": pos.to_dict(),
++        })
++        logging.warning(
++            f"[execution] {pos.ticker}: закрытая сделка trade_id={trade_id} "
++            f"с неполным восстановлением CSV архивирована перед заменой "
++            f"позиции по тому же FIGI (задача персистентна в state.json)")
++
+     def register(self, **kwargs) -> TrackedPosition:
+         figi = kwargs.get("figi")
+         if figi and self.has_active_position(figi):
+@@ -326,6 +392,7 @@
+             )
+             return existing
+         self._archive_closed_entry_order(self.positions.get(figi))
++        self.archive_pending_csv_recovery(self.positions.get(figi))
+         pos = TrackedPosition(**kwargs)
+         # v2.3.0-stage1 (С1): точка инициализации №1 — SL/TP фиксируются на
+         # момент входа (плановый риск для триггера безубытка).
+@@ -362,6 +429,7 @@
+         if direction not in ("BUY", "SELL") or int(quantity) <= 0 or int(lot_size) <= 0:
+             raise ValueError("Некорректная RECOVERY-позиция")
+         self._archive_closed_entry_order(self.positions.get(figi))
++        self.archive_pending_csv_recovery(self.positions.get(figi))
+         pos = TrackedPosition(
+             figi=figi, ticker=ticker, direction=direction, entry_price=0.0,
+             quantity=int(quantity), sl_price=0.0, tp_price=0.0,
+@@ -1118,6 +1186,13 @@
+             "positions": {figi: pos.to_dict() for figi, pos in self.positions.items()},
+             "monitoring_error": self.monitoring_error,
+             "closed_entry_order_ids": closed_ids,
++            # v2.3.7-stage1 (B2 V4): незавершённые recovery-задачи переживают
++            # перезапуск. Приватные (runtime-only) ключи записей не
++            # сохраняются — в state.json попадает только устойчивый снимок.
++            "pending_csv_recoveries": [
++                {k: v for k, v in rec.items() if not str(k).startswith("_")}
++                for rec in self.pending_csv_recoveries
++            ],
+         }
+ 
+     def import_state(self, data):
+@@ -1150,3 +1225,57 @@
+                 logging.error(f"[execution] import_state {figi}: {type(exc).__name__}: {exc}")
+         self.positions = restored
+         self.monitoring_error = bool(data.get("monitoring_error", False))
++        # v2.3.7-stage1 (B2 V4): восстановление незавершённых recovery-задач.
++        # Обратная совместимость: старый state.json без ключа -> пустой
++        # список. Повреждённая/неполная запись отбрасывается ЦЕЛИКОМ с
++        # журналом (fail-closed по записи, без падения процесса): задача
++        # непригодна, если её снимок позиции не восстанавливается
++        # TrackedPosition.from_dict — восстановление по ней невозможно,
++        # а сохранение мусора порождало бы вечные ошибки в recovery-цикле.
++        raw_pending = data.get("pending_csv_recoveries", [])
++        pending: List[dict] = []
++        if isinstance(raw_pending, list):
++            for rec in raw_pending:
++                if not isinstance(rec, dict):
++                    logging.error(
++                        "[execution] import_state: запись "
++                        "pending_csv_recoveries не dict — отброшена")
++                    continue
++                snap = rec.get("position")
++                if not isinstance(snap, dict):
++                    logging.error(
++                        "[execution] import_state: запись "
++                        "pending_csv_recoveries без снимка позиции — "
++                        "отброшена")
++                    continue
++                trade_id = str(rec.get("trade_id") or snap.get("trade_id") or "")
++                try:
++                    TrackedPosition.from_dict(snap)  # валидация восстановимости
++                except Exception as exc:
++                    logging.error(
++                        "[execution] import_state: recovery-задача "
++                        f"trade_id={trade_id or '?'} невосстановима "
++                        f"({type(exc).__name__}: {exc}) — отброшена")
++                    continue
++                if not trade_id:
++                    logging.error(
++                        "[execution] import_state: recovery-задача без "
++                        "trade_id — отброшена (fail-closed)")
++                    continue
++                pending.append({
++                    "version": rec.get("version", 1),
++                    "trade_id": trade_id,
++                    "figi": rec.get("figi") or snap.get("figi") or "",
++                    "ticker": rec.get("ticker") or snap.get("ticker") or "",
++                    "reason": rec.get("reason", ""),
++                    "position": snap,
++                })
++        else:
++            logging.error(
++                "[execution] import_state: pending_csv_recoveries не list — "
++                "восстановление задач пропущено (обратная совместимость)")
++        self.pending_csv_recoveries = pending
++        if pending:
++            logging.warning(
++                f"[execution] import_state: восстановлено незавершённых "
++                f"recovery-задач CSV: {len(pending)}")
+--- a/logger.py
++++ b/logger.py
+@@ -44,24 +44,45 @@
+ #         cumulative) не меняет ни одной строки — файл не переписывается.
+ 
+ #       * ПЕРЕСЧЁТ НАКОПИТЕЛЬНОГО P&L: после обновления строки
+-
++
+ #         cumulative_net_pnl_rub пересчитывается для ВСЕХ строк с
+-
+-#         непустым net_pnl_rub в порядке файла (хронологическом порядке
+-
+-#         закрытий) — позднее изменение финансового результата старой
+-
+-#         сделки корректно отражается в накопительной статистике всех
+-
+-#         последующих сделок.
+-
++
++#         непустым net_pnl_rub в ГАРАНТИРОВАННОМ ХРОНОЛОГИЧЕСКОМ
++
++#         ПОРЯДКЕ ЗАКРЫТИЯ (v2.3.7-stage1: авторитетное время закрытия —
++
++#         exit_time; см. _recompute_cumulative) — позднее изменение
++
++#         финансового результата старой сделки корректно отражается в
++
++#         накопительной статистике всех последующих сделок.
++
+ #       * СХЕМА CSV НЕ ИЗМЕНЯЕТСЯ: столбцы и их порядок прежние
+-
++
+ #         (TRADE_FIELDS); неизменённые строки не затрагиваются;
+-
++
+ #         обрезанная/битая строка (крах в момент append) дополняется
+-
++
+ #         пустыми полями без удаления (данные не теряются).
++#
++# v2.3.7-stage1 (B2 V4: CHRONOLOGICAL CUMULATIVE + PERSISTENT RECOVERY):
++#
++#   - _recompute_cumulative(rows) пересчитывает cumulative_net_pnl_rub
++#     в ХРОНОЛОГИЧЕСКОМ порядке закрытия сделок, а НЕ в порядке строк
++#     файла (порядок строк = порядок записи/регистрации и НЕ гарантирует
++#     хронологию фактических закрытий). Авторитетное время закрытия —
++#     exit_time; при его отсутствии/некорректности — детерминированная
++#     fallback-цепочка из самой строки (timestamp_utc -> order_send_time
++#     -> signal_time); полностью неизвестное время — фиксированный якорь
++#     (минимальная дата UTC, НЕ текущее системное время). Tie-breaker
++#     одинаковых меток — trade_id, затем индекс строки (полная
++#     детерминированность). Сами строки файла НЕ переставляются.
++#
++#   - log_trade() после успешного append канонизирует журнал:
++#     пересчитывает cumulative всех строк в хронологическом порядке;
++#     если хронология совпадает с порядком файла (штатный случай) — файл
++#     НЕ переписывается (идемпотентность). Порядок СТРОК не меняется,
++#     net_pnl_rub не изменяется — обновляется только столбец cumulative.
+ 
+ 
+ import csv
+@@ -177,7 +198,16 @@
+ 
+ 
+ def log_trade(trade: dict) -> bool:
+-    """Записывает сделку в CSV. Возвращает True при успехе, False при ошибке."""
++    """Записывает сделку в CSV. Возвращает True при успехе, False при ошибке.
++
++    v2.3.7-stage1 (V4 Problem №1): после успешного append журнал
++    КАНОНИЗИРУЕТСЯ — cumulative_net_pnl_rub всех строк пересчитывается в
++    хронологическом порядке закрытия (recompute_cumulative_chronological).
++    Порядок СТРОК файла не меняется; net_pnl_rub не изменяется. Если
++    хронология совпадает с порядком файла (штатный случай) — файл НЕ
++    переписывается (идемпотентность). Сбой канонизации не отменяет
++    успешный append строки (True): исходный файл остаётся целостным,
++    канонизация повторится при следующей записи."""
+     if not _ensure_files():
+         return False
+     row = {field: trade.get(field, "") for field in TRADE_FIELDS}
+@@ -185,10 +215,15 @@
+         with open(TRADES_FILE, "a", encoding="utf-8", newline="") as f:
+             writer = csv.DictWriter(f, fieldnames=TRADE_FIELDS, delimiter=";")
+             writer.writerow(row)
+-        return True
+     except Exception as e:
+         logging.error(f"[logger] Не удалось записать сделку: {e}")
+         return False
++    status = recompute_cumulative_chronological()
++    if status == "error":
++        logging.error(
++            "[logger] канонизация cumulative после записи не удалась — "
++            "строка записана (append успешен); повтор при следующей записи")
++    return True
+ 
+ 
+ def _read_all_trade_rows():
+@@ -243,20 +278,79 @@
+     return "found", dict(matches[0])
+ 
+ 
+-def _recompute_cumulative(rows):
+-    """v2.3.6-stage1: пересчёт cumulative_net_pnl_rub для ВСЕХ строк в порядке
+-    файла (хронологическом порядке закрытий).
++# v2.3.7-stage1 (V4): фиксированный якорь для строк с полностью неизвестным
++# временем закрытия. НЕ текущее системное время: детерминированная минимальная
++# дата (такая строка сортируется первой, tie-break — trade_id).
++_CHRONO_UNKNOWN_TS = datetime(1, 1, 1, tzinfo=timezone.utc)
++
++
++def _parse_csv_ts(value):
++    """v2.3.7-stage1 (V4): разбор ISO-timestamp из ячейки CSV.
++
++    Возвращает datetime (tz-aware; naive трактуется как UTC — журнал
++    ведётся в UTC) или None, если значение пустое/некорректное.
++    Никаких подстановок текущего времени: None = "время неизвестно"."""
++    raw = str(value or "").strip()
++    if not raw:
++        return None
++    try:
++        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
++    except (TypeError, ValueError):
++        return None
++    if dt.tzinfo is None:
++        dt = dt.replace(tzinfo=timezone.utc)
++    return dt
++
++
++def _row_chrono_key(row, index):
++    """v2.3.7-stage1 (V4): ключ хронологической сортировки строки закрытия.
++
++    АВТОРИТЕТНОЕ ВРЕМЯ ЗАКРЫТИЯ — столбец exit_time (время запроса
++    закрытия позиции close-заявкой; для закрытий без своей заявки —
++    момент фиксации закрытия при записи строки; фиксируется ОДИН раз
++    при записи и не меняется при recovery-обновлениях).
++
++    Детерминированная fallback-цепочка — ТОЛЬКО поля самой строки, в
++    порядке убывания близости к моменту закрытия:
++      exit_time -> timestamp_utc (время запроса закрытия) ->
++      order_send_time (отправка SELL) -> signal_time.
++    Полностью неизвестное/некорректное время — фиксированный якорь
++    _CHRONO_UNKNOWN_TS (строка сортируется первой; НЕ текущее системное
++    время — повторный запуск не меняет результат).
++
++    Tie-breaker одинаковых меток времени — trade_id (лексикографически),
++    затем индекс строки в файле (гарантия полного порядка даже при
++    дублирующихся trade_id)."""
++    for field in ("exit_time", "timestamp_utc", "order_send_time",
++                  "signal_time"):
++        dt = _parse_csv_ts(row.get(field))
++        if dt is not None:
++            return (dt, str(row.get("trade_id") or ""), index)
++    return (_CHRONO_UNKNOWN_TS, str(row.get("trade_id") or ""), index)
++
+ 
+-    Строки с пустым/нечисловым net_pnl_rub (PRICE_UNKNOWN) не меняются
+-    (их cumulative остаётся как был — обычно пустой) и в сумму не входят.
+-    Значения парсятся из строк CSV (уже округлены до 2 знаков при записи) —
+-    пересчёт детерминирован содержимым файла: повторный запуск даёт тот же
+-    результат, что и однократный.
++def _recompute_cumulative(rows):
++    """v2.3.7-stage1 (V4 Problem №1): пересчёт cumulative_net_pnl_rub для ВСЕХ
++    строк с непустым net_pnl_rub в ГАРАНТИРОВАННОМ ХРОНОЛОГИЧЕСКОМ порядке
++    закрытия сделок (_row_chrono_key), а НЕ в порядке строк файла: порядок
++    строк = порядок записи (регистрации позиций) и не гарантирует хронологию
++    фактических закрытий; позднее восстановление метаданных старой сделки
++    меняет её net P&L и требует пересчёта всех последующих сделок.
++
++    Свойства:
++      * строки файла НЕ переставляются и их поля (кроме столбца
++        cumulative_net_pnl_rub) не изменяются;
++      * строки с пустым/нечисловым net_pnl_rub (PRICE_UNKNOWN) не меняются
++        (их cumulative остаётся как был — обычно пустой) и в сумму не входят;
++      * значения парсятся из строк CSV (округлены до 2 знаков при записи);
++      * РЕЗУЛЬТАТ ДЕТЕРМИНИРОВАН: одинаковый набор строк всегда даёт
++        одинаковые cumulative значения — независимо от порядка строк в
++        файле и числа повторов пересчёта (хронологический порядок +
++        стабильный tie-breaker trade_id + индекс строки).
+ 
+     Возвращает True, если хотя бы одна строка изменилась."""
+-    changed = False
+-    running = 0.0
+-    for row in rows:
++    entries = []
++    for idx, row in enumerate(rows):
+         raw = str(row.get("net_pnl_rub") or "").strip()
+         if not raw:
+             continue
+@@ -264,14 +358,42 @@
+             value = float(raw.replace(",", ".").replace(" ", ""))
+         except (TypeError, ValueError):
+             continue
++        entries.append((idx, value, _row_chrono_key(row, idx)))
++    entries.sort(key=lambda entry: entry[2])
++    changed = False
++    running = 0.0
++    for idx, value, _key in entries:
+         running += value
+         new_cum = f"{running:.2f}"
+-        if row.get("cumulative_net_pnl_rub", "") != new_cum:
+-            row["cumulative_net_pnl_rub"] = new_cum
++        if rows[idx].get("cumulative_net_pnl_rub", "") != new_cum:
++            rows[idx]["cumulative_net_pnl_rub"] = new_cum
+             changed = True
+     return changed
+ 
+ 
++def recompute_cumulative_chronological() -> str:
++    """v2.3.7-stage1 (V4 Problem №1): канонизация столбца
++    cumulative_net_pnl_rub ВСЕГО журнала в хронологическом порядке закрытия
++    сделок (_recompute_cumulative).
++
++    Строки НЕ переставляются, net_pnl_rub и прочие поля не меняются;
++    файл перезаписывается ТОЛЬКО если хотя бы одно значение cumulative
++    реально изменилось (идемпотентность: штатный журнал не переписывается).
++    Запись атомарная (_write_all_trade_rows_atomic): при любой ошибке
++    исходный файл остаётся нетронутым.
++
++    Возвращает "updated" | "unchanged" | "error"."""
++    rows, fieldnames = _read_all_trade_rows()
++    if rows is None:
++        return "error"
++    if not _recompute_cumulative(rows):
++        return "unchanged"
++    if not _write_all_trade_rows_atomic(rows, fieldnames,
++                                        expect_rows=len(rows)):
++        return "error"
++    return "updated"
++
++
+ def _read_tmp_rows(path: str):
+     """v2.3.6-stage1: чтение временного CSV для проверки результата записи.
+     Возвращает (rows, fieldnames) как _read_all_trade_rows, но по явному

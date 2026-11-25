@@ -1,0 +1,314 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0
+rootdir: /home/z
+configfile: pyproject.toml
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 8 items
+
+test_b2_terminal_metadata_recovery.py FFF.FFFF                           [100%]
+
+=================================== FAILURES ===================================
+_______________ test_a_repeat_report_recovers_missing_commission _______________
+
+    def test_a_repeat_report_recovers_missing_commission():
+        """Первый терминальный отчёт применил 3/10 (цена известна, комиссия
+        отсутствовала). Второй идентичный отчёт содержит фактическую комиссию —
+        она восстанавливается без повторного применения исполнения."""
+        monitor, pos = make_direct_setup(quantity=10, requested=10)
+        assert apply_first(monitor, pos, price=110.0, commission=None) is True
+        cur = pos.close_orders[OID]
+        assert cur["commission"] is None
+        assert pos.actual_commission is None
+        assert cur["avg_exec_price"] == pytest.approx(110.0)
+        state_before = pos.state
+    
+        # Повторный достоверный отчёт: та же заявка/исполнение/цена, комиссия 1.5.
+        r = repeat(monitor, pos, price=110.0, commission=1.5)
+    
+        assert r is False  # контракт повтора сохранён (B2 identity-проверка)
+        # Комиссия восстановлена в cursor и в позиции.
+>       assert cur["commission"] == pytest.approx(1.5)
+E       assert None == 1.5 ± 1.5e-06
+E         
+E         comparison failed
+E         Obtained: None
+E         Expected: 1.5 ± 1.5e-06
+
+test_b2_terminal_metadata_recovery.py:253: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 09:59:29,370 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+2026-11-24 09:59:29,370 - INFO - [execution] TEST: повторный терминальный отчёт sell-meta (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+------------------------------ Captured log call -------------------------------
+INFO     root:execution.py:320 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+INFO     root:execution.py:566 [execution] TEST: повторный терминальный отчёт sell-meta (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+____________ test_b_repeat_report_recovers_missing_execution_price _____________
+
+    def test_b_repeat_report_recovers_missing_execution_price():
+        """Первый отчёт применил 3/10 (комиссия известна, цена отсутствовала).
+        Второй идентичный отчёт содержит фактическую цену — она восстанавливается,
+        комиссия сохраняется, повторного применения лотов нет."""
+        monitor, pos = make_direct_setup(quantity=10, requested=10)
+        assert apply_first(monitor, pos, price=None, commission=1.5) is True
+        cur = pos.close_orders[OID]
+        assert cur["avg_exec_price"] is None
+        assert pos.execution_price is None
+        assert pos.exit_price_confirmed is False
+        assert cur["commission"] == pytest.approx(1.5)
+        state_before = pos.state
+    
+        r = repeat(monitor, pos, price=110.0, commission=1.5)
+    
+        assert r is False
+        # Цена восстановлена в cursor и в позиции, признак подтверждённости — по
+        # инварианту ТЗ-5 (цена подтверждена только отчётом реального close-ордера).
+>       assert cur["avg_exec_price"] == pytest.approx(110.0)
+E       assert None == 110.0 ± 1.1e-04
+E         
+E         comparison failed
+E         Obtained: None
+E         Expected: 110.0 ± 1.1e-04
+
+test_b2_terminal_metadata_recovery.py:288: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 09:59:29,414 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+2026-11-24 09:59:29,414 - INFO - [execution] TEST: повторный терминальный отчёт sell-meta (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+------------------------------ Captured log call -------------------------------
+INFO     root:execution.py:320 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+INFO     root:execution.py:566 [execution] TEST: повторный терминальный отчёт sell-meta (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+___________ test_c_repeat_report_recovers_both_price_and_commission ____________
+
+    def test_c_repeat_report_recovers_both_price_and_commission():
+        """Первый отчёт не содержал ни цены, ни комиссии; второй идентичный отчёт
+        содержит оба значения — оба восстанавливаются без повторного применения."""
+        monitor, pos = make_direct_setup(quantity=10, requested=10)
+        assert apply_first(monitor, pos, price=None, commission=None) is True
+        cur = pos.close_orders[OID]
+        assert cur["avg_exec_price"] is None and cur["commission"] is None
+        assert pos.execution_price is None and pos.actual_commission is None
+    
+        r = repeat(monitor, pos, price=110.0, commission=1.5)
+    
+        assert r is False
+>       assert cur["avg_exec_price"] == pytest.approx(110.0)
+E       assert None == 110.0 ± 1.1e-04
+E         
+E         comparison failed
+E         Obtained: None
+E         Expected: 110.0 ± 1.1e-04
+
+test_b2_terminal_metadata_recovery.py:316: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 09:59:29,423 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+2026-11-24 09:59:29,423 - INFO - [execution] TEST: повторный терминальный отчёт sell-meta (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+------------------------------ Captured log call -------------------------------
+INFO     root:execution.py:320 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+INFO     root:execution.py:566 [execution] TEST: повторный терминальный отчёт sell-meta (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+_________________ test_e_conflicting_commission_is_fail_closed _________________
+
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7f573704b590>
+
+    def test_e_conflicting_commission_is_fail_closed(caplog):
+        """Первый отчёт учёл фактическую комиссию 1.5; второй достоверный отчёт
+        содержит другую комиссию 2.0 — противоречие двух достоверных значений:
+        UNCERTAIN, конфликт зарегистрирован в логе, исходная комиссия не
+        перезаписана, повторного применения нет."""
+        monitor, pos = make_direct_setup(quantity=10, requested=10)
+        assert apply_first(monitor, pos, price=110.0, commission=1.5) is True
+        cur = pos.close_orders[OID]
+        # Позиция разрешена брокерским снимком (остаток 7 подтверждён) -> OPEN:
+        # противоречие ОБЯЗАНО вернуть её в fail-closed UNCERTAIN.
+        pos.state = PositionState.OPEN
+    
+        with caplog.at_level("ERROR"):
+            r = repeat(monitor, pos, price=110.0, commission=2.0)
+    
+        assert r is False
+>       assert pos.state == PositionState.UNCERTAIN       # fail-closed
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: assert <PositionState.OPEN: 'OPEN'> == <PositionStat...: 'UNCERTAIN'>
+E         
+E         - UNCERTAIN
+E         + OPEN
+
+test_b2_terminal_metadata_recovery.py:379: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 09:59:29,433 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:execution.py:320 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+___________________ test_f_conflicting_price_is_fail_closed ____________________
+
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7f573704c8f0>
+
+    def test_f_conflicting_price_is_fail_closed(caplog):
+        """Аналогично тесту E для цены исполнения: 110 -> 120 при том же
+        исполнении — UNCERTAIN, цена не перезаписана, применения нет."""
+        monitor, pos = make_direct_setup(quantity=10, requested=10)
+        assert apply_first(monitor, pos, price=110.0, commission=1.5) is True
+        cur = pos.close_orders[OID]
+        pos.state = PositionState.OPEN
+    
+        with caplog.at_level("ERROR"):
+            r = repeat(monitor, pos, price=120.0, commission=1.5)
+    
+        assert r is False
+>       assert pos.state == PositionState.UNCERTAIN       # fail-closed
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: assert <PositionState.OPEN: 'OPEN'> == <PositionStat...: 'UNCERTAIN'>
+E         
+E         - UNCERTAIN
+E         + OPEN
+
+test_b2_terminal_metadata_recovery.py:408: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 09:59:29,442 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:execution.py:320 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+________ test_g_repeated_terminal_reports_are_fully_idempotent_with_csv ________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-22/test_g_repeated_terminal_repor0')
+
+    def test_g_repeated_terminal_reports_are_fully_idempotent_with_csv(isolated_paths):
+        """Несколько идентичных терминальных отчётов подряд через штатный B2-поток
+        main.py: количество, applied, confirmed, история применений и CSV не
+        дублируются; комиссия, появившаяся во втором отчёте, восстанавливается и
+        сохраняется на последующих повторах (без перезаписи и без искажения
+        частичного результата первой обработки)."""
+        from order_ledger import OrderLedger
+    
+        tmp_path = isolated_paths
+        ledger = OrderLedger(str(tmp_path / "order_ledger.jsonl"))
+        ledger.load()
+        now = datetime.now(timezone.utc)
+        pos = TrackedPosition(
+            figi="F1", ticker="TEST", direction="BUY", entry_price=100.0,
+            quantity=10, sl_price=98.0, tp_price=104.0, lot_size=1,
+            state=PositionState.OPEN, trade_id="t-g",
+            price_before_order=100.0,
+            # Вход час назад: после первого прогона close_order_request_id
+            # очищается штатным терминальным путём apply_close_execution, и
+            # повторные прогоны ищут запись реестра по времени входа (как в
+            # make_buy_pos из test_b2_close_accounting.py).
+            order_send_time=(now - timedelta(hours=1)).isoformat(),
+        )
+        monitor = ExecutionMonitor(FakeClient())
+        monitor.positions[pos.figi] = pos
+        oid = "sell-g"
+        assert ledger.record_intent(oid, trade_id=pos.trade_id, figi=pos.figi,
+                                    ticker=pos.ticker, side="SELL",
+                                    requested_lots=10, reason="close:SL")
+        pos.close_order_request_id = oid
+        pos.close_requested_lots = 10
+        pos.state = PositionState.CLOSING
+        monitor.add_close_order(pos, oid, 10)
+        ledger.record_sent(oid, figi="F1", ticker="TEST", side="SELL",
+                           requested_lots=10, executed_lots=0, status_hint="NEW")
+    
+        # --- Прогон 1: терминальный отчёт CANCELLED 3/10, цена 110, без комиссии.
+        client1 = FakeClient(order_state=FakeState(
+            status_code=3, lots_executed=3, price_units=330, commission=None))
+        assert run(main._try_resolve_absent_position(client1, ledger, pos, monitor)) \
+            == "ledger_close"
+        run(main.process_closing(client1, monitor, None))
+        assert len(read_trades_csv(tmp_path)) == 1
+        cur = pos.close_orders[oid]
+        assert cur["applied_lots"] == 3 and cur["confirmed_executed_lots"] == 3
+        assert cur["commission"] is None
+        assert pos.quantity == 0 and pos.partial is True
+        history_1 = list(pos.close_applications)
+    
+        # --- Прогон 2: идентичный отчёт, БРОКЕР УЖЕ ПЕРЕДАЛ КОМИССИЮ 1.5.
+        client2 = FakeClient(order_state=FakeState(
+            status_code=3, lots_executed=3, price_units=330,
+            commission=_MV(1, 500000000)))
+        assert run(main._try_resolve_absent_position(client2, ledger, pos, monitor)) \
+            == "ledger_close"   # безопасный повтор (не противоречие)
+        # Комиссия восстановлена (дефект устранён).
+>       assert cur["commission"] == pytest.approx(1.5)
+E       assert None == 1.5 ± 1.5e-06
+E         
+E         comparison failed
+E         Obtained: None
+E         Expected: 1.5 ± 1.5e-06
+
+test_b2_terminal_metadata_recovery.py:478: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 09:59:29,453 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-g (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 09:59:29,453 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-g: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+2026-11-24 09:59:29,454 - INFO - ✅ [CLOSED] TEST LEDGER_CLOSE entry=100.0000 exit=110.0000 lots=3 gross=+30.00₽ net=+29.68₽ cum=+29.68₽
+2026-11-24 09:59:29,454 - INFO - [notify] 🔒 <b>TEST</b> закрыто по LEDGER_CLOSE
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 3 (акций: 3)
+Net: <b>+29.68 ₽</b>
+2026-11-24 09:59:29,454 - INFO - [execution] TEST: повторный терминальный отчёт sell-g (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+2026-11-24 09:59:29,454 - INFO - [reconcile] TEST: повторный идентичный терминальный отчёт SELL sell-g (executed=3, status=CANCELLED, price=110.0, commission=1.5) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+2026-11-24 09:59:29,454 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-g (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 09:59:29,455 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-g: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+WARNING  root:main.py:1619 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-g (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:804 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-g: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+INFO     root:main.py:2326 ✅ [CLOSED] TEST LEDGER_CLOSE entry=100.0000 exit=110.0000 lots=3 gross=+30.00₽ net=+29.68₽ cum=+29.68₽
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> закрыто по LEDGER_CLOSE
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 3 (акций: 3)
+Net: <b>+29.68 ₽</b>
+INFO     root:execution.py:566 [execution] TEST: повторный терминальный отчёт sell-g (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+INFO     root:main.py:1536 [reconcile] TEST: повторный идентичный терминальный отчёт SELL sell-g (executed=3, status=CANCELLED, price=110.0, commission=1.5) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+WARNING  root:main.py:1619 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-g (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:804 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-g: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+__________ test_h_safe_repeat_does_not_change_resolved_position_state __________
+
+    def test_h_safe_repeat_does_not_change_resolved_position_state():
+        """Позиция, корректно разрешённая после частичного исполнения (остаток
+        подтверждён брокерским снимком -> OPEN), и позиция, закрытая учётом
+        (полный SELL -> CLOSED): безопасный повтор с новыми метаданными сохраняет
+        их состояние, количество и ссылки заявки."""
+        # --- Вариант 1: позиция разрешена в OPEN после частичного терминала ---
+        monitor, pos = make_direct_setup(quantity=10, requested=10)
+        assert apply_first(monitor, pos, price=110.0, commission=None) is True
+        assert pos.state == PositionState.UNCERTAIN
+        assert pos.quantity == 7
+        assert pos.close_order_id is None          # завершённая заявка очищена
+        # Разрешение брокерским снимком: остаток 7 подтверждён -> OPEN.
+        pos.state = PositionState.OPEN
+    
+        r = repeat(monitor, pos, price=110.0, commission=1.5)
+    
+        assert r is False
+        assert pos.state == PositionState.OPEN            # НЕ переведена в UNCERTAIN
+        assert pos.quantity == 7                          # количество не изменено
+        assert pos.close_order_id is None                 # ссылки не воскрешены
+>       assert pos.actual_commission == pytest.approx(1.5)  # метаданные восстановлены
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       assert None == 1.5 ± 1.5e-06
+E         
+E         comparison failed
+E         Obtained: None
+E         Expected: 1.5 ± 1.5e-06
+
+test_b2_terminal_metadata_recovery.py:535: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 09:59:29,465 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+2026-11-24 09:59:29,465 - INFO - [execution] TEST: повторный терминальный отчёт sell-meta (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+------------------------------ Captured log call -------------------------------
+INFO     root:execution.py:320 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+INFO     root:execution.py:566 [execution] TEST: повторный терминальный отчёт sell-meta (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+=========================== short test summary info ============================
+FAILED test_b2_terminal_metadata_recovery.py::test_a_repeat_report_recovers_missing_commission
+FAILED test_b2_terminal_metadata_recovery.py::test_b_repeat_report_recovers_missing_execution_price
+FAILED test_b2_terminal_metadata_recovery.py::test_c_repeat_report_recovers_both_price_and_commission
+FAILED test_b2_terminal_metadata_recovery.py::test_e_conflicting_commission_is_fail_closed
+FAILED test_b2_terminal_metadata_recovery.py::test_f_conflicting_price_is_fail_closed
+FAILED test_b2_terminal_metadata_recovery.py::test_g_repeated_terminal_reports_are_fully_idempotent_with_csv
+FAILED test_b2_terminal_metadata_recovery.py::test_h_safe_repeat_does_not_change_resolved_position_state
+========================= 7 failed, 1 passed in 0.34s ==========================

@@ -1,0 +1,471 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0 -- /home/z/.venv/bin/python3
+metadata: {'Python': '3.12.16', 'Platform': 'Linux-5.10.134-013.15.kangaroo.al8.x86_64-x86_64-with-glibc2.41', 'Packages': {'pytest': '9.0.2', 'pluggy': '1.6.0'}, 'Plugins': {'Faker': '40.1.2', 'metadata': '3.1.1', 'asyncio': '1.3.0', 'ddtrace': '4.2.2', 'cov': '7.0.0', 'json-report': '1.5.0', 'anyio': '4.13.0'}}
+rootdir: /home/z
+configfile: pyproject.toml
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 10 items
+
+test_b2_v5_identity_and_timestamp.py::test_v5_a_lost_sell_response_keeps_request_timestamp FAILED [ 10%]
+test_b2_v5_identity_and_timestamp.py::test_v5_b_cumulative_follows_saved_request_timestamps FAILED [ 20%]
+test_b2_v5_identity_and_timestamp.py::test_v5_c_request_timestamp_survives_restart FAILED [ 30%]
+test_b2_v5_identity_and_timestamp.py::test_v5_d_legacy_state_restores_ts_from_cursor FAILED [ 40%]
+test_b2_v5_identity_and_timestamp.py::test_v5_e_recovery_task_trade_id_mismatch_fail_closed FAILED [ 50%]
+test_b2_v5_identity_and_timestamp.py::test_v5_f_recovery_task_figi_mismatch_fail_closed FAILED [ 60%]
+test_b2_v5_identity_and_timestamp.py::test_v5_g_cursor_identity_mismatch_fail_closed FAILED [ 70%]
+test_b2_v5_identity_and_timestamp.py::test_v5_h_duplicate_trade_id_conflicting_tasks_fail_closed FAILED [ 80%]
+test_b2_v5_identity_and_timestamp.py::test_v5_i_row_identity_mismatch_blocks_update FAILED [ 90%]
+test_b2_v5_identity_and_timestamp.py::test_v5_j_valid_task_after_restart_completes_normally PASSED [100%]
+
+=================================== FAILURES ===================================
+_____________ test_v5_a_lost_sell_response_keeps_request_timestamp _____________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-16/test_v5_a_lost_sell_response_k0')
+clock = <env_baseline_v5.test_b2_v5_identity_and_timestamp._Clock object at 0x7f59d44f98e0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f59d44ecf80>
+
+    def test_v5_a_lost_sell_response_keeps_request_timestamp(isolated_paths, clock,
+                                                             monkeypatch):
+        """SELL отправлена, ответ потерян (result.state=None); позиция позднее
+        закрыта по восстановленному отчёту В ДРУГОЕ время. CSV exit_time должен
+        соответствовать ПЕРВОНАЧАЛЬНОМУ времени запроса (сохранённому до
+        сетевого вызова), а не времени позднего восстановления."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_open_position(monitor, "F1", "t-va5")
+    
+        # --- SELL при 09:05, ответ потерян ---
+        lost = close_lost_response(clock, monitor, pos, T_0905, monkeypatch)
+        req_id = pos.close_order_request_id
+        # Единый timestamp сохранён ДО сетевого вызова и в позиции, и в cursor'е —
+        # ОДНО И ТО ЖЕ значение:
+>       assert pos.close_requested_at == T_0905
+E       AssertionError: assert None == '2026-11-20T09:05:00+00:00'
+E        +  where None = TrackedPosition(figi='F1', ticker='TEST', direction='BUY', entry_price=100.0, quantity=10, sl_price=98.0, tp_price=104.0, lot_size=1, state=<PositionState.UNCERTAIN: 'UNCERTAIN'>, close_reason=None, close_order_id=None, close_requested_at=None, close_price_before_order=100.0, executed_lots=0, execution_price=None, trade_id='t-va5', signal_reason='', signal_time='', price_before_order=100.0, order_send_time='2026-11-20T09:00:00+00:00', partial=False, logged=False, actual_commission=None, entry_actual_commission=None, entry_order_id=None, entry_requested_lots=0, entry_applied_lots=0, entry_snapshot_synced=False, close_requested_lots=0, close_applied_lots=0, recovery_source=None, close_orders={'bfa18c1c-3c58-4bf6-9a84-da2cdb9fc0bf': {'order_id': 'bfa18c1c-3c58-4bf6-9a84-da2cdb9fc0bf', 'trade_id': 't-va5', 'figi': 'F1', 'side': 'SELL', 'requested_lots': 10, 'confirmed_executed_lots': 0, 'applied_lots': 0, 'status': 'INTENT', 'requested_at': '2026-11-20T09:05:00+00:00', 'avg_exec_price': None, 'commission': None}}, close_applications=[], initial_sl_price=0.0, initial_tp_price=0.0, mae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=False, close_order_request_id='bfa18c1c-3c58-4bf6-9a84-da2cdb9fc0bf').close_requested_at
+
+test_b2_v5_identity_and_timestamp.py:433: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 14:52:34,294 - ERROR - [close] TEST: state=None (order_request_id=bfa18c1c-3c58-4bf6-9a84-da2cdb9fc0bf) — UNCERTAIN. Повторная отправка запрещена.
+------------------------------ Captured log call -------------------------------
+ERROR    root:main.py:2088 [close] TEST: state=None (order_request_id=bfa18c1c-3c58-4bf6-9a84-da2cdb9fc0bf) — UNCERTAIN. Повторная отправка запрещена.
+____________ test_v5_b_cumulative_follows_saved_request_timestamps _____________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-16/test_v5_b_cumulative_follows_s0')
+clock = <env_baseline_v5.test_b2_v5_identity_and_timestamp._Clock object at 0x7f59d4509460>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f59d450a7e0>
+
+    def test_v5_b_cumulative_follows_saved_request_timestamps(isolated_paths, clock,
+                                                               monkeypatch):
+        """Сделка 1: SELL запрос при 09:05, ответ потерян; сделка 2 закрыта
+        при 10:00 и записана ПЕРВОЙ. При 10:20 сделка 1 восстанавливается по
+        отчёту. Хронология cumulative должна следовать СОХРАНЁННЫМ временам
+        запросов (09:05 < 10:00), несмотря на порядок строк файла (2, 1) и
+        на время восстановления 10:20."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        pos1 = make_open_position(monitor, "F1", "t-vb1")
+    
+        lost = close_lost_response(clock, monitor, pos1, T_0905, monkeypatch)
+        req1 = pos1.close_order_request_id
+    
+        # Вторая сделка закрыта (10:00) и записана ПЕРВОЙ (строка 1 файла):
+        _mon2, pos2, _client2 = make_closed_logged_at(
+            tmp_path, trade_id="t-vb2", figi="F2", oid="sell-b2",
+            close_at=T_1000, price=105.0, commission=2.0)
+        rows = read_trades_csv(tmp_path)
+        assert len(rows) == 1 and rows[0]["trade_id"] == "t-vb2"
+        assert rows[0]["exit_time"] == T_1000
+    
+        # Восстановление первой сделки по позднему отчёту (10:20).
+        # resolve_closing опрашивает клиента МОНИТОРА — отчёт регистрируется
+        # в том же FakeClient, что создан вместе с монитором:
+        clock.set(T_1020)
+        client = monitor.client
+        client._order_states[req1] = FakeState(
+            status_code=3, lots_executed=LOTS,
+            price_units=110.0 * LOTS, commission=1.5)
+        run(main.process_closing(client, monitor, None))
+    
+        rows = read_trades_csv(tmp_path)
+        assert len(rows) == 2
+        by_id = {r["trade_id"]: r for r in rows}
+        # exit_time первой сделки = сохранённое время ЗАПРОСА (09:05),
+        # не время восстановления (10:20):
+>       assert by_id["t-vb1"]["exit_time"] == T_0905
+E       AssertionError: assert '2026-11-20T10:20:00+00:00' == '2026-11-20T09:05:00+00:00'
+E         
+E         - 2026-11-20T09:05:00+00:00
+E         ?             -  -
+E         + 2026-11-20T10:20:00+00:00
+E         ?            +  +
+
+test_b2_v5_identity_and_timestamp.py:507: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 14:52:34,345 - ERROR - [close] TEST: state=None (order_request_id=04cbce6a-e791-4582-a2a9-1475d7b46aab) — UNCERTAIN. Повторная отправка запрещена.
+2026-11-24 14:52:34,347 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=105.0000 lots=10 gross=+50.00₽ net=+47.49₽ cum=+47.49₽
+2026-11-24 14:52:34,347 - INFO - [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 105.0000
+Лотов: 10 (акций: 10)
+Net: <b>+47.49 ₽</b>
+2026-11-24 14:52:34,349 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+97.97₽ cum=+145.47₽
+2026-11-24 14:52:34,349 - INFO - [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+97.97 ₽</b>
+------------------------------ Captured log call -------------------------------
+ERROR    root:main.py:2088 [close] TEST: state=None (order_request_id=04cbce6a-e791-4582-a2a9-1475d7b46aab) — UNCERTAIN. Повторная отправка запрещена.
+INFO     root:main.py:2773 ✅ [CLOSED] TEST None entry=100.0000 exit=105.0000 lots=10 gross=+50.00₽ net=+47.49₽ cum=+47.49₽
+INFO     root:main.py:855 [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 105.0000
+Лотов: 10 (акций: 10)
+Net: <b>+47.49 ₽</b>
+INFO     root:main.py:2773 ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+97.97₽ cum=+145.47₽
+INFO     root:main.py:855 [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+97.97 ₽</b>
+_________________ test_v5_c_request_timestamp_survives_restart _________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-16/test_v5_c_request_timestamp_su0')
+clock = <env_baseline_v5.test_b2_v5_identity_and_timestamp._Clock object at 0x7f59d4512a20>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f59d4512a80>
+
+    def test_v5_c_request_timestamp_survives_restart(isolated_paths, clock,
+                                                     monkeypatch):
+        """Потерянный ответ SELL (09:05) -> перезапуск -> восстановление (10:20).
+        Timestamp запроса переживает сохранение/загрузку state.json без
+        изменений; CSV exit_time после рестарта = время запроса."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_open_position(monitor, "F1", "t-vc5")
+    
+        close_lost_response(clock, monitor, pos, T_0905, monkeypatch)
+        req_id = pos.close_order_request_id
+    
+        # --- Перезапуск ---
+        monitor2 = restart(tmp_path, monitor)
+        pos1r = monitor2.positions["F1"]
+>       assert pos1r.close_requested_at == T_0905, \
+            "close_requested_at сохранён в state.json без изменений"
+E       AssertionError: close_requested_at сохранён в state.json без изменений
+E       assert None == '2026-11-20T09:05:00+00:00'
+E        +  where None = TrackedPosition(figi='F1', ticker='TEST', direction='BUY', entry_price=100.0, quantity=10, sl_price=98.0, tp_price=104.0, lot_size=1, state=<PositionState.UNCERTAIN: 'UNCERTAIN'>, close_reason=None, close_order_id=None, close_requested_at=None, close_price_before_order=100.0, executed_lots=0, execution_price=None, trade_id='t-vc5', signal_reason='', signal_time='', price_before_order=100.0, order_send_time='2026-11-20T09:00:00+00:00', partial=False, logged=False, actual_commission=None, entry_actual_commission=None, entry_order_id=None, entry_requested_lots=0, entry_applied_lots=0, entry_snapshot_synced=False, close_requested_lots=0, close_applied_lots=0, recovery_source=None, close_orders={'1f068fa2-06c8-4e0b-b086-03699a947c3b': {'order_id': '1f068fa2-06c8-4e0b-b086-03699a947c3b', 'trade_id': 't-vc5', 'figi': 'F1', 'side': 'SELL', 'requested_lots': 10, 'confirmed_executed_lots': 0, 'applied_lots': 0, 'status': 'INTENT', 'requested_at': '2026-11-20T09:05:00+00:00', 'avg_exec_price': None, 'commission': None}}, close_applications=[], initial_sl_price=0.0, initial_tp_price=0.0, mae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=False, close_order_request_id='1f068fa2-06c8-4e0b-b086-03699a947c3b').close_requested_at
+
+test_b2_v5_identity_and_timestamp.py:538: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 14:52:34,366 - ERROR - [close] TEST: state=None (order_request_id=1f068fa2-06c8-4e0b-b086-03699a947c3b) — UNCERTAIN. Повторная отправка запрещена.
+2026-11-24 14:52:34,367 - INFO - [state] Загружено позиций: 1
+------------------------------ Captured log call -------------------------------
+ERROR    root:main.py:2088 [close] TEST: state=None (order_request_id=1f068fa2-06c8-4e0b-b086-03699a947c3b) — UNCERTAIN. Повторная отправка запрещена.
+INFO     root:main.py:1169 [state] Загружено позиций: 1
+________________ test_v5_d_legacy_state_restores_ts_from_cursor ________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-16/test_v5_d_legacy_state_restore0')
+clock = <env_baseline_v5.test_b2_v5_identity_and_timestamp._Clock object at 0x7f59d4515a00>
+
+    def test_v5_d_legacy_state_restores_ts_from_cursor(isolated_paths, clock):
+        """Легаси-позиция: close_requested_at отсутствует (null в state.json),
+        но собственный per-order cursor close-заявки содержит requested_at.
+        При записи CSV время закрытия берётся ИЗ CURSOR'А, а не из времени
+        текущего запуска (clock=10:10 при восстановлении != 09:05)."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_open_position(monitor, "F1", "t-vd5")
+    
+        # Легаси-путь: cursor создан с известным временем запроса,
+        # close_requested_at в позиции ОТСУТСТВУЕТ (старый state.json).
+        monitor.add_close_order(pos, "sell-d5", LOTS, requested_at=T_0905)
+        pos.close_order_request_id = "sell-d5"
+        pos.close_requested_lots = LOTS
+        pos.close_requested_at = None
+        assert monitor.apply_close_execution(
+            pos, "sell-d5", LOTS, "CANCELLED", execution_price=None,
+            commission=None, requested_lots=LOTS) is True
+        assert pos.state == PositionState.CLOSED
+        pos.close_requested_at = None  # гарантируем «легаси»-состояние
+    
+        # --- Перезапуск: в state.json поле отсутствует (null) ---
+        monitor2 = restart(tmp_path, monitor)
+        pos1r = monitor2.positions["F1"]
+        assert not pos1r.close_requested_at
+        cursor = pos1r.close_orders["sell-d5"]
+        assert cursor["requested_at"] == T_0905
+    
+        # --- Запись CSV в время ТЕКУЩЕГО запуска (10:10) ---
+        clock.set(T_1010)
+        client = FakeClient(order_states={
+            "sell-d5": FakeState(status_code=3, lots_executed=LOTS,
+                                 price_units=None, commission=None),
+        })
+        run(main.process_closing(client, monitor2, None))
+    
+        rows = read_trades_csv(tmp_path)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["trade_id"] == "t-vd5"
+        # ГЛАВНОЕ: время из cursor'а, НЕ время текущего запуска:
+>       assert row["exit_time"] == T_0905
+E       AssertionError: assert '2026-11-20T10:10:00+00:00' == '2026-11-20T09:05:00+00:00'
+E         
+E         - 2026-11-20T09:05:00+00:00
+E         ?             -  -
+E         + 2026-11-20T10:10:00+00:00
+E         ?            +  +
+
+test_b2_v5_identity_and_timestamp.py:609: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 14:52:34,383 - INFO - [state] Загружено позиций: 1
+2026-11-24 14:52:34,384 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 14:52:34,384 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:1169 [state] Загружено позиций: 1
+INFO     root:main.py:2780 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:855 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+____________ test_v5_e_recovery_task_trade_id_mismatch_fail_closed _____________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-16/test_v5_e_recovery_task_trade_0')
+clock = <env_baseline_v5.test_b2_v5_identity_and_timestamp._Clock object at 0x7f59d45150a0>
+
+    def test_v5_e_recovery_task_trade_id_mismatch_fail_closed(isolated_paths, clock):
+        """Несогласованная внешняя запись задачи (trade_id отличается от снимка):
+        при импорте задача помечается конфликтом, брокер не опрашивается,
+        CSV не изменяется, задача НЕ удаляется как завершённая; событие с
+        причиной конфликта записано."""
+        tmp_path = isolated_paths
+        monitor, pos1, _ = make_closed_logged_at(
+            tmp_path, trade_id="t-ve5", figi="F1", oid="sell-e5",
+            close_at=T_1000, price=None, commission=None)
+        register_new_position(monitor, "F1", "t-ve5-n")
+        assert len(monitor.pending_csv_recoveries) == 1
+        task = monitor.pending_csv_recoveries[0]
+        assert task["trade_id"] == "t-ve5"
+        # Эмуляция несогласованной внешней записи (рекорд указывает на другую
+        # сделку, чем его собственный снимок):
+        task["trade_id"] = "t-other"
+>       validator_result = ExecutionMonitor.validate_recovery_identity(task)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: type object 'ExecutionMonitor' has no attribute 'validate_recovery_identity'
+
+test_b2_v5_identity_and_timestamp.py:635: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 14:52:34,401 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 14:52:34,401 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 14:52:34,401 - WARNING - [execution] TEST: закрытая сделка trade_id=t-ve5 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 14:52:34,401 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2780 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:855 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:380 [execution] TEST: закрытая сделка trade_id=t-ve5 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:406 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+______________ test_v5_f_recovery_task_figi_mismatch_fail_closed _______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-16/test_v5_f_recovery_task_figi_m0')
+clock = <env_baseline_v5.test_b2_v5_identity_and_timestamp._Clock object at 0x7f59d43f9310>
+
+    def test_v5_f_recovery_task_figi_mismatch_fail_closed(isolated_paths, clock):
+        """rec.figi != snapshot.figi: задача блокируется при импорте (конфликт
+        figi_mismatch), брокер не опрашивается, CSV не изменяется, задача
+        остаётся с маркером; чужая строка не обновляется."""
+        tmp_path = isolated_paths
+        monitor, pos1, _ = make_closed_logged_at(
+            tmp_path, trade_id="t-vf5", figi="F1", oid="sell-f5",
+            close_at=T_1000, price=None, commission=None)
+        register_new_position(monitor, "F1", "t-vf5-n")
+        task = monitor.pending_csv_recoveries[0]
+        assert task["figi"] == "F1"
+        task["figi"] = "F9"  # внешняя запись указывает на другой FIGI
+>       assert ExecutionMonitor.validate_recovery_identity(task) == "figi_mismatch"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: type object 'ExecutionMonitor' has no attribute 'validate_recovery_identity'
+
+test_b2_v5_identity_and_timestamp.py:681: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 14:52:34,418 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 14:52:34,419 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 14:52:34,419 - WARNING - [execution] TEST: закрытая сделка trade_id=t-vf5 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 14:52:34,419 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2780 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:855 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:380 [execution] TEST: закрытая сделка trade_id=t-vf5 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:406 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+________________ test_v5_g_cursor_identity_mismatch_fail_closed ________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-16/test_v5_g_cursor_identity_mism0')
+clock = <env_baseline_v5.test_b2_v5_identity_and_timestamp._Clock object at 0x7f59d43f9160>
+
+    def test_v5_g_cursor_identity_mismatch_fail_closed(isolated_paths, clock):
+        """Cursor собственной close-заявки снимка привязан к ДРУГОЙ сделке
+        (другой trade_id / другой FIGI): идентичность отчёта и сделки не
+        подтверждена — задача блокируется (cursor_trade_id_mismatch /
+        cursor_figi_mismatch), брокер не опрашивается, CSV не изменяется."""
+        tmp_path = isolated_paths
+        # --- Вариант 1: cursor с другим trade_id ---
+        monitor, pos1, _ = make_closed_logged_at(
+            tmp_path, trade_id="t-vg5", figi="F1", oid="sell-g5",
+            close_at=T_1000, price=None, commission=None)
+        register_new_position(monitor, "F1", "t-vg5-n")
+        task = monitor.pending_csv_recoveries[0]
+        snap_cursor = task["position"]["close_orders"]["sell-g5"]
+        snap_cursor["trade_id"] = "t-foreign"
+>       assert ExecutionMonitor.validate_recovery_identity(task) == \
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            "cursor_trade_id_mismatch"
+E       AttributeError: type object 'ExecutionMonitor' has no attribute 'validate_recovery_identity'
+
+test_b2_v5_identity_and_timestamp.py:724: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 14:52:34,436 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 14:52:34,436 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 14:52:34,437 - WARNING - [execution] TEST: закрытая сделка trade_id=t-vg5 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 14:52:34,437 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2780 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:855 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:380 [execution] TEST: закрытая сделка trade_id=t-vg5 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:406 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+__________ test_v5_h_duplicate_trade_id_conflicting_tasks_fail_closed __________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-16/test_v5_h_duplicate_trade_id_c0')
+clock = <env_baseline_v5.test_b2_v5_identity_and_timestamp._Clock object at 0x7f59d43f9e20>
+
+    def test_v5_h_duplicate_trade_id_conflicting_tasks_fail_closed(isolated_paths,
+                                                                   clock):
+        """Два задания с одним trade_id и РАЗНЫМИ снимками/close-заявками:
+        при импорте ОБЕ помечаются duplicate_trade_id_conflicting, ни одна не
+        выбирается произвольно, брокер не опрашивается, CSV не изменяется,
+        ни одна не удаляется и не завершается."""
+        tmp_path = isolated_paths
+        monitor, pos1, _ = make_closed_logged_at(
+            tmp_path, trade_id="t-vh5", figi="F1", oid="sell-ha",
+            close_at=T_1000, price=None, commission=None)
+        register_new_position(monitor, "F1", "t-vh5-n1")
+        tasks = monitor.pending_csv_recoveries
+        assert len(tasks) == 1
+        # Вторая задача с ТОМ ЖЕ trade_id, но ДРУГОЙ close-заявкой/снимком
+        # (в очередь попадает при импорте повреждённого state.json):
+        task2 = json.loads(json.dumps(tasks[0]))
+        task2["position"]["close_order_request_id"] = "sell-hb"
+        task2["position"]["close_order_id"] = None
+        task2["position"]["close_orders"] = {"sell-hb": {
+            "order_id": "sell-hb", "trade_id": "t-vh5", "figi": "F1",
+            "side": "SELL", "requested_lots": LOTS,
+            "confirmed_executed_lots": LOTS, "applied_lots": LOTS,
+            "status": "CANCELLED", "requested_at": T_1005,
+            "avg_exec_price": None, "commission": None,
+        }}
+        tasks.append(task2)
+        # Канонические тела задач различны -> конфликтующие дубликаты:
+>       assert (ExecutionMonitor._recovery_canonical_body(tasks[0])
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                != ExecutionMonitor._recovery_canonical_body(task2))
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_recovery_canonical_body'
+
+test_b2_v5_identity_and_timestamp.py:797: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 14:52:34,454 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 14:52:34,454 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 14:52:34,455 - WARNING - [execution] TEST: закрытая сделка trade_id=t-vh5 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 14:52:34,455 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2780 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:855 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:380 [execution] TEST: закрытая сделка trade_id=t-vh5 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:406 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+________________ test_v5_i_row_identity_mismatch_blocks_update _________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-16/test_v5_i_row_identity_mismatc0')
+clock = <env_baseline_v5.test_b2_v5_identity_and_timestamp._Clock object at 0x7f59d43fcc80>
+
+    def test_v5_i_row_identity_mismatch_blocks_update(isolated_paths, clock):
+        """Строка CSV, найденная по trade_id, противоречит снимку сделки по
+        FIGI (вариант 1) или order_id (вариант 2) — обновление ЗАПРЕЩЕНО,
+        чужая строка не изменяется, событие конфликта записано. После
+        исправления строки штатное восстановление работает (контроль)."""
+        tmp_path = isolated_paths
+        monitor, pos1, _ = make_closed_logged_at(
+            tmp_path, trade_id="t-vi5", figi="F1", oid="sell-i5",
+            close_at=T_1000, price=None, commission=None)
+        register_new_position(monitor, "F1", "t-vi5-n")
+        assert len(monitor.pending_csv_recoveries) == 1
+        report = FakeState(status_code=3, lots_executed=LOTS,
+                           price_units=110.0 * LOTS, commission=1.5)
+    
+        # --- Вариант 1: figi строки противоречит снимку ---
+        assert research_logger.update_trade_row(
+            "t-vi5", {"figi": "F9"})[0] == "updated"
+        bytes_before = read_trades_bytes(tmp_path)
+        clock.set(T_1020)
+        run(main.process_closing(
+            FakeClient(order_states={"sell-i5": report}), monitor, None))
+>       assert read_trades_bytes(tmp_path) == bytes_before, \
+            "чужая строка (figi) не изменяется"
+E       AssertionError: чужая строка (figi) не изменяется
+E       assert b'trade_id;ti...6;98.0000\r\n' == b'trade_id;ti...6;98.0000\r\n'
+E         
+E         At index 631 diff: b'1' != b';'
+E         
+E         Full diff:
+E           (b'trade_id;timestamp_utc;ticker;figi;lot_size;side;signal_reason;signal_time;p'
+E            b'rice_before_order;order_send_time;order_id;execution_status;requested_lots;e'
+E            b'xecuted_lots;execution_price;exit_reason;exit_price;exit_time;commission_rub'...
+E         
+E         ...Full output truncated (18 lines hidden), use '-vv' to show
+
+test_b2_v5_identity_and_timestamp.py:855: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 14:52:34,473 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 14:52:34,473 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 14:52:34,473 - WARNING - [execution] TEST: закрытая сделка trade_id=t-vi5 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 14:52:34,473 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+2026-11-24 14:52:34,474 - INFO - [logger] trade_id=t-vi5: строка сделки обновлена (поля: figi); файл перезаписан атомарно (1 строк данных)
+2026-11-24 14:52:34,475 - INFO - [csv-recovery] TEST: поздние метаданные брокера для sell-i5 восстановлены в cursor/позицию: avg_exec_price, commission (лоты уже учтены: 10, без повторного применения)
+2026-11-24 14:52:34,475 - INFO - [logger] trade_id=t-vi5: строка сделки обновлена (поля: exit_price, commission_rub, commission_source, actual_commission_rub, entry_commission_rub, exit_commission_rub, slippage_rub, slippage_percent, gross_pnl_rub, net_pnl_rub, error_note); файл перезаписан атомарно (1 строк данных)
+2026-11-24 14:52:34,475 - INFO - [csv-recovery] TEST: CSV-строка trade_id=t-vi5 обновлена (поля: actual_commission_rub, commission_rub, commission_source, entry_commission_rub, error_note, exit_commission_rub, exit_price, gross_pnl_rub, net_pnl_rub, slippage_percent, slippage_rub) — накопительный P&L пересчитан
+2026-11-24 14:52:34,476 - INFO - [csv-recovery] TEST: задача trade_id=t-vi5 завершена (цена и фактическая комиссия подтверждены в CSV) — удалена из очереди восстановления
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2780 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:855 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:380 [execution] TEST: закрытая сделка trade_id=t-vi5 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:406 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+INFO     root:logger.py:558 [logger] trade_id=t-vi5: строка сделки обновлена (поля: figi); файл перезаписан атомарно (1 строк данных)
+INFO     root:main.py:2469 [csv-recovery] TEST: поздние метаданные брокера для sell-i5 восстановлены в cursor/позицию: avg_exec_price, commission (лоты уже учтены: 10, без повторного применения)
+INFO     root:logger.py:558 [logger] trade_id=t-vi5: строка сделки обновлена (поля: exit_price, commission_rub, commission_source, actual_commission_rub, entry_commission_rub, exit_commission_rub, slippage_rub, slippage_percent, gross_pnl_rub, net_pnl_rub, error_note); файл перезаписан атомарно (1 строк данных)
+INFO     root:main.py:2486 [csv-recovery] TEST: CSV-строка trade_id=t-vi5 обновлена (поля: actual_commission_rub, commission_rub, commission_source, entry_commission_rub, error_note, exit_commission_rub, exit_price, gross_pnl_rub, net_pnl_rub, slippage_percent, slippage_rub) — накопительный P&L пересчитан
+INFO     root:main.py:2904 [csv-recovery] TEST: задача trade_id=t-vi5 завершена (цена и фактическая комиссия подтверждены в CSV) — удалена из очереди восстановления
+=========================== short test summary info ============================
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_a_lost_sell_response_keeps_request_timestamp
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_b_cumulative_follows_saved_request_timestamps
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_c_request_timestamp_survives_restart
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_d_legacy_state_restores_ts_from_cursor
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_e_recovery_task_trade_id_mismatch_fail_closed
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_f_recovery_task_figi_mismatch_fail_closed
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_g_cursor_identity_mismatch_fail_closed
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_h_duplicate_trade_id_conflicting_tasks_fail_closed
+FAILED test_b2_v5_identity_and_timestamp.py::test_v5_i_row_identity_mismatch_blocks_update
+========================= 9 failed, 1 passed in 0.46s ==========================

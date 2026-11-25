@@ -1,0 +1,19 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0 -- /home/z/.venv/bin/python3
+metadata: {'Python': '3.12.16', 'Platform': 'Linux-5.10.134-013.15.kangaroo.al8.x86_64-x86_64-with-glibc2.41', 'Packages': {'pytest': '9.0.2', 'pluggy': '1.6.0'}, 'Plugins': {'Faker': '40.1.2', 'metadata': '3.1.1', 'asyncio': '1.3.0', 'ddtrace': '4.2.2', 'cov': '7.0.0', 'json-report': '1.5.0', 'anyio': '4.13.0'}}
+rootdir: /home/z
+configfile: pyproject.toml
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 8 items
+
+test_b2_terminal_metadata_recovery.py::test_a_repeat_report_recovers_missing_commission PASSED [ 12%]
+test_b2_terminal_metadata_recovery.py::test_b_repeat_report_recovers_missing_execution_price PASSED [ 25%]
+test_b2_terminal_metadata_recovery.py::test_c_repeat_report_recovers_both_price_and_commission PASSED [ 37%]
+test_b2_terminal_metadata_recovery.py::test_d_known_commission_is_not_overwritten PASSED [ 50%]
+test_b2_terminal_metadata_recovery.py::test_e_conflicting_commission_is_fail_closed PASSED [ 62%]
+test_b2_terminal_metadata_recovery.py::test_f_conflicting_price_is_fail_closed PASSED [ 75%]
+test_b2_terminal_metadata_recovery.py::test_g_repeated_terminal_reports_are_fully_idempotent_with_csv PASSED [ 87%]
+test_b2_terminal_metadata_recovery.py::test_h_safe_repeat_does_not_change_resolved_position_state PASSED [100%]
+
+============================== 8 passed in 0.25s ===============================

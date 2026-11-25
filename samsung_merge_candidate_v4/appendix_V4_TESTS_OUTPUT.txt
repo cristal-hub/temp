@@ -1,0 +1,14 @@
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 9 items
+
+test_b2_v4_accounting_consistency.py::test_v4_a_cumulative_follows_close_chronology_not_file_order PASSED [ 11%]
+test_b2_v4_accounting_consistency.py::test_v4_b_late_commission_change_recomputes_subsequent_cumulative PASSED [ 22%]
+test_b2_v4_accounting_consistency.py::test_v4_c_identical_exit_times_stable_tiebreaker PASSED [ 33%]
+test_b2_v4_accounting_consistency.py::test_v4_d_missing_or_garbage_timestamps_deterministic PASSED [ 44%]
+test_b2_v4_accounting_consistency.py::test_v4_e_new_position_same_figi_keeps_recovery_task PASSED [ 55%]
+test_b2_v4_accounting_consistency.py::test_v4_f_two_trades_same_figi_reports_not_mixed PASSED [ 66%]
+test_b2_v4_accounting_consistency.py::test_v4_g_recovery_task_survives_restart PASSED [ 77%]
+test_b2_v4_accounting_consistency.py::test_v4_h_identity_conflict_fail_closed PASSED [ 88%]
+test_b2_v4_accounting_consistency.py::test_v4_i_csv_error_keeps_task_and_file_intact PASSED [100%]
+
+============================== 9 passed in 0.39s ===============================

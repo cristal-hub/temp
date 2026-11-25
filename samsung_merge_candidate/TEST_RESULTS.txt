@@ -1,0 +1,235 @@
+================================================================================
+TEST_RESULTS.txt — B2 INTEGRATION INTO AUTHORITATIVE SAMSUNG MAIN.PY
+================================================================================
+Окружение: полное дерево cristal-hub-Tsclp_v2.1_volatile_Samsung @ 051b10f...
+Python 3.12.16, pytest 9.0.2, pytest-asyncio 1.3.0, pluggy 1.6.0
+Команда обоих прогонов (baseline и final — ИДЕНТИЧНАЯ):
+  python3 -m pytest -p no:cacheprovider --continue-on-collection-errors
+Baseline-дерево:   env_baseline (Samsung @ 051b10f, без изменений)
+Final-дерево:      env_final (Samsung @ 051b10f + merged main.py +
+                   test_b2_close_accounting.py из samsung_merge_candidate/)
+Полные журналы: appendix_BASELINE_FULL_PYTEST.txt, appendix_FINAL_FULL_PYTEST.txt
+
+--------------------------------------------------------------------------------
+РАЗДЕЛ 1. 20 B2-тестов на объединённой версии (env_final)
+Команда: python3 -m pytest -p no:cacheprovider test_b2_close_accounting.py -v
+--------------------------------------------------------------------------------
+
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0 -- /home/z/.venv/bin/python3
+metadata: {'Python': '3.12.16', 'Platform': 'Linux-5.10.134-013.15.kangaroo.al8.x86_64-x86_64-with-glibc2.41', 'Packages': {'pytest': '9.0.2', 'pluggy': '1.6.0'}, 'Plugins': {'Faker': '40.1.2', 'metadata': '3.1.1', 'asyncio': '1.3.0', 'ddtrace': '4.2.2', 'cov': '7.0.0', 'json-report': '1.5.0', 'anyio': '4.13.0'}}
+rootdir: /home/z
+configfile: pyproject.toml
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 20 items
+
+test_b2_close_accounting.py::test_01_full_sell_23_via_b2_applies_via_cursor PASSED [  5%]
+test_b2_close_accounting.py::test_02_full_sell_already_applied_by_resolve_closing_no_double_apply PASSED [ 10%]
+test_b2_close_accounting.py::test_03_repeated_identical_terminal_report_no_reapplication PASSED [ 15%]
+test_b2_close_accounting.py::test_04_contradictory_repeat_with_increased_cumulative_fail_closed PASSED [ 20%]
+test_b2_close_accounting.py::test_05_partial_3_of_10_cancelled_lots_already_applied PASSED [ 25%]
+test_b2_close_accounting.py::test_06_partial_3_of_10_cancelled_b2_first_gets_terminal_report PASSED [ 30%]
+test_b2_close_accounting.py::test_07_csv_keeps_requested_10_and_executed_3 PASSED [ 35%]
+test_b2_close_accounting.py::test_08_actual_commission_and_execution_price_preserved PASSED [ 40%]
+test_b2_close_accounting.py::test_09_no_fictitious_pnl_for_externally_closed_remainder PASSED [ 45%]
+test_b2_close_accounting.py::test_10_b3_external_close_without_own_sell_unchanged PASSED [ 50%]
+test_b2_close_accounting.py::test_11a_ledger_sync_failure_safe_state PASSED [ 55%]
+test_b2_close_accounting.py::test_11b_unknown_status_without_broker_answer_no_false_closed PASSED [ 60%]
+test_b2_close_accounting.py::test_12_repeated_reconciliation_no_reapply_no_csv_duplicates PASSED [ 65%]
+test_b2_close_accounting.py::test_b2_terminal_ledger_record_without_cursor_recovers_broker_commission PASSED [ 70%]
+test_b2_close_accounting.py::test_b2_record_commission_reused_without_broker_poll PASSED [ 75%]
+test_b2_close_accounting.py::test_b2_terminal_repeat_different_status_is_contradiction PASSED [ 80%]
+test_b2_close_accounting.py::test_b2_terminal_repeat_different_price_is_contradiction PASSED [ 85%]
+test_b2_close_accounting.py::test_b2_terminal_repeat_different_commission_is_contradiction PASSED [ 90%]
+test_b2_close_accounting.py::test_b2_terminal_repeat_missing_optional_data_is_idempotent PASSED [ 95%]
+test_b2_close_accounting.py::test_b2_terminal_repeat_exact_report_is_idempotent PASSED [100%]
+
+============================== 20 passed in 0.34s ==============================
+
+
+--------------------------------------------------------------------------------
+РАЗДЕЛ 2. Полный pytest — baseline (Samsung @ 051b10f, исходный main.py)
+Итоговая строка и полный список FAILED:
+--------------------------------------------------------------------------------
+
+ИТОГ baseline: =================== 74 failed, 566 passed, 1 error in 9.94s ====================
+
+FAILED test_buy_registration_fix2.py::test_g_primary_buy_unsaved_state - Type...
+FAILED test_buy_registration_fix2_FIX2_snapshot.py::test_g_primary_buy_unsaved_state
+FAILED test_p0_batch2_late_execution.py::test_n1_no_premotion_while_order_alive
+FAILED test_p0_batch2_late_execution.py::test_n1_promotion_only_at_terminal_syncs_final_quantity
+FAILED test_p0_batch2_late_execution.py::test_n4_late_growth_after_terminal_cancelled_actually_repolled
+FAILED test_p0_batch2_late_execution.py::test_integration_trading_cycle_partial_cancel_recovery_open_late_lots
+FAILED test_p0_batch2_late_execution.py::test_p03_1_repeated_buy_report_does_not_restore_sold_lots
+FAILED test_p0_batch2_late_execution.py::test_p03_2_stale_buy_report_contradiction_blocks_buy
+FAILED test_p0_batch2_late_execution.py::test_p04_reconcile_before_poll_no_reapply_of_late_lots
+FAILED test_p0_batch2_late_execution.py::test_p05_1_first_ambiguous_growth_sets_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_2_repeated_same_lots_poll_keeps_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_3_failed_or_contradictory_reconcile_keeps_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_4_successful_reconcile_allows_resolution_no_side_effects
+FAILED test_p0_sell_id_fixes.py::test_16_request_lookup_unavailable_fails_closed
+FAILED test_persistence.py::test_subprocess_saves_state_then_killed - Asserti...
+FAILED test_persistence.py::test_second_process_restores_state - AssertionErr...
+FAILED test_screener.py::test_screener_returns_top_n - assert None is not None
+FAILED test_screener.py::test_screener_valid_result_less_than_10 - assert Non...
+FAILED test_screener.py::test_screener_filters_low_turnover - assert 1 == 0
+FAILED test_screener.py::test_screener_cache - assert 4 == 1
+FAILED test_screener.py::test_screener_partial_scan_returns_none - assert 2 == 1
+FAILED test_screener.py::test_screener_error_does_not_return_stale_cache - as...
+FAILED test_strategy.py::test_adx_same_candle_does_not_increase_streak - Attr...
+FAILED test_strategy.py::test_adx_flips_after_two_new_candles - AttributeErro...
+FAILED test_strategy.py::test_adx_candidate_reversal_resets_streak - Attribut...
+FAILED tests/test_buy_registration_fix2 (1).py::test_g_primary_buy_unsaved_state
+FAILED tests/test_buy_registration_fix2.py::test_g_primary_buy_unsaved_state
+FAILED tests/test_buy_registration_fix2_FIX2_snapshot.py::test_g_primary_buy_unsaved_state
+FAILED tests/test_execution.py::test_partial_sell_then_second_sell_uses_own_cursor
+FAILED tests/test_execution.py::test_terminal_partial_sell_reopens_remaining_position
+FAILED tests/test_fail_closed.py::test_mixed_commission_source - AssertionErr...
+FAILED tests/test_main.py::test_trading_cycle_not_fill_but_executed_creates_position
+FAILED tests/test_main_helpers.py::test_process_closing_model_commission - As...
+FAILED tests/test_main_helpers.py::test_process_closing_actual_commission - A...
+FAILED tests/test_main_helpers.py::test_process_closing_mixed_commission_is_mixed
+FAILED tests/test_main_helpers.py::test_process_closing_entry_and_exit_sum_to_total
+FAILED tests/test_main_helpers.py::test_process_closing_slippage_percent - Va...
+FAILED tests/test_main_helpers.py::test_process_closing_cumulative_net_pnl - ...
+FAILED tests/test_p0_batch2_late_execution.py::test_n1_no_premotion_while_order_alive
+FAILED tests/test_p0_batch2_late_execution.py::test_n1_promotion_only_at_terminal_syncs_final_quantity
+FAILED tests/test_p0_batch2_late_execution.py::test_n3_unknown_figi_execution_not_registered_global_block
+FAILED tests/test_p0_batch2_late_execution.py::test_n4_late_growth_after_terminal_cancelled_actually_repolled
+FAILED tests/test_p0_batch2_late_execution.py::test_integration_trading_cycle_partial_cancel_recovery_open_late_lots
+FAILED tests/test_p0_batch2_late_execution.py::test_p03_1_repeated_buy_report_does_not_restore_sold_lots
+FAILED tests/test_p0_batch2_late_execution.py::test_p03_2_stale_buy_report_contradiction_blocks_buy
+FAILED tests/test_p0_batch2_late_execution.py::test_p04_reconcile_before_poll_no_reapply_of_late_lots
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_1_first_ambiguous_growth_sets_uncertain
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_2_repeated_same_lots_poll_keeps_uncertain
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_3_failed_or_contradictory_reconcile_keeps_uncertain
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_4_successful_reconcile_allows_resolution_no_side_effects
+FAILED tests/test_p0_defect_fixes.py::test_scenario_1_partial_buy_cancelled_portfolio_silent
+FAILED tests/test_p0_defect_fixes.py::test_defect1_unavailable_portfolio_with_confirmed_lots_registers
+FAILED tests/test_p0_defect_fixes.py::test_scenario_2_cancelled_with_executed_lots
+FAILED tests/test_p0_defect_fixes.py::test_scenario_3_expired_with_executed_lots
+FAILED tests/test_p0_defect_fixes.py::test_scenario_4_repeated_poll_no_quantity_doubling
+FAILED tests/test_p0_defect_fixes.py::test_scenario_5_late_execution_after_cancel
+FAILED tests/test_p0_defect_fixes.py::test_poll_registers_before_cancel - Typ...
+FAILED tests/test_p0_defect_fixes.py::test_scenario_6_new_order_regularly_polled_reaches_timeout
+FAILED tests/test_p0_defect_fixes.py::test_defect4_unknown_side_resolves_only_without_execution
+FAILED tests/test_p0_defect_fixes.py::test_scenario_14_fill_zero_lots_resolves_after_reconnect
+FAILED tests/test_p0_defect_fixes.py::test_defect8_poll_fill_zero_lots_stays_uncertain
+FAILED tests/test_p0_defect_fixes.py::test_scenario_16_registered_partial_not_added_again
+FAILED tests/test_p0_defect_fixes.py::test_defect2_only_executed_quantity_registered
+FAILED tests/test_persistence.py::test_subprocess_saves_state_then_killed - A...
+FAILED tests/test_persistence.py::test_second_process_restores_state - Assert...
+FAILED tests/test_screener.py::test_screener_returns_top_n - assert None is n...
+FAILED tests/test_screener.py::test_screener_valid_result_less_than_10 - asse...
+FAILED tests/test_screener.py::test_screener_filters_low_turnover - assert 1 ...
+FAILED tests/test_screener.py::test_screener_cache - assert 4 == 1
+FAILED tests/test_screener.py::test_screener_partial_scan_returns_none - asse...
+FAILED tests/test_screener.py::test_screener_error_does_not_return_stale_cache
+FAILED tests/test_strategy.py::test_adx_same_candle_does_not_increase_streak
+FAILED tests/test_strategy.py::test_adx_flips_after_two_new_candles - Attribu...
+FAILED tests/test_strategy.py::test_adx_candidate_reversal_resets_streak - At...
+
+--------------------------------------------------------------------------------
+РАЗДЕЛ 3. Полный pytest — final (Samsung + объединённый main.py + B2-тесты)
+Итоговая строка и полный список FAILED:
+--------------------------------------------------------------------------------
+
+ИТОГ final:    =================== 74 failed, 586 passed, 1 error in 10.76s ===================
+
+FAILED test_buy_registration_fix2.py::test_g_primary_buy_unsaved_state - Type...
+FAILED test_buy_registration_fix2_FIX2_snapshot.py::test_g_primary_buy_unsaved_state
+FAILED test_p0_batch2_late_execution.py::test_n1_no_premotion_while_order_alive
+FAILED test_p0_batch2_late_execution.py::test_n1_promotion_only_at_terminal_syncs_final_quantity
+FAILED test_p0_batch2_late_execution.py::test_n4_late_growth_after_terminal_cancelled_actually_repolled
+FAILED test_p0_batch2_late_execution.py::test_integration_trading_cycle_partial_cancel_recovery_open_late_lots
+FAILED test_p0_batch2_late_execution.py::test_p03_1_repeated_buy_report_does_not_restore_sold_lots
+FAILED test_p0_batch2_late_execution.py::test_p03_2_stale_buy_report_contradiction_blocks_buy
+FAILED test_p0_batch2_late_execution.py::test_p04_reconcile_before_poll_no_reapply_of_late_lots
+FAILED test_p0_batch2_late_execution.py::test_p05_1_first_ambiguous_growth_sets_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_2_repeated_same_lots_poll_keeps_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_3_failed_or_contradictory_reconcile_keeps_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_4_successful_reconcile_allows_resolution_no_side_effects
+FAILED test_p0_sell_id_fixes.py::test_16_request_lookup_unavailable_fails_closed
+FAILED test_persistence.py::test_subprocess_saves_state_then_killed - Asserti...
+FAILED test_persistence.py::test_second_process_restores_state - AssertionErr...
+FAILED test_screener.py::test_screener_returns_top_n - assert None is not None
+FAILED test_screener.py::test_screener_valid_result_less_than_10 - assert Non...
+FAILED test_screener.py::test_screener_filters_low_turnover - assert 1 == 0
+FAILED test_screener.py::test_screener_cache - assert 4 == 1
+FAILED test_screener.py::test_screener_partial_scan_returns_none - assert 2 == 1
+FAILED test_screener.py::test_screener_error_does_not_return_stale_cache - as...
+FAILED test_strategy.py::test_adx_same_candle_does_not_increase_streak - Attr...
+FAILED test_strategy.py::test_adx_flips_after_two_new_candles - AttributeErro...
+FAILED test_strategy.py::test_adx_candidate_reversal_resets_streak - Attribut...
+FAILED tests/test_buy_registration_fix2 (1).py::test_g_primary_buy_unsaved_state
+FAILED tests/test_buy_registration_fix2.py::test_g_primary_buy_unsaved_state
+FAILED tests/test_buy_registration_fix2_FIX2_snapshot.py::test_g_primary_buy_unsaved_state
+FAILED tests/test_execution.py::test_partial_sell_then_second_sell_uses_own_cursor
+FAILED tests/test_execution.py::test_terminal_partial_sell_reopens_remaining_position
+FAILED tests/test_fail_closed.py::test_mixed_commission_source - AssertionErr...
+FAILED tests/test_main.py::test_trading_cycle_not_fill_but_executed_creates_position
+FAILED tests/test_main_helpers.py::test_process_closing_model_commission - As...
+FAILED tests/test_main_helpers.py::test_process_closing_actual_commission - A...
+FAILED tests/test_main_helpers.py::test_process_closing_mixed_commission_is_mixed
+FAILED tests/test_main_helpers.py::test_process_closing_entry_and_exit_sum_to_total
+FAILED tests/test_main_helpers.py::test_process_closing_slippage_percent - Va...
+FAILED tests/test_main_helpers.py::test_process_closing_cumulative_net_pnl - ...
+FAILED tests/test_p0_batch2_late_execution.py::test_n1_no_premotion_while_order_alive
+FAILED tests/test_p0_batch2_late_execution.py::test_n1_promotion_only_at_terminal_syncs_final_quantity
+FAILED tests/test_p0_batch2_late_execution.py::test_n3_unknown_figi_execution_not_registered_global_block
+FAILED tests/test_p0_batch2_late_execution.py::test_n4_late_growth_after_terminal_cancelled_actually_repolled
+FAILED tests/test_p0_batch2_late_execution.py::test_integration_trading_cycle_partial_cancel_recovery_open_late_lots
+FAILED tests/test_p0_batch2_late_execution.py::test_p03_1_repeated_buy_report_does_not_restore_sold_lots
+FAILED tests/test_p0_batch2_late_execution.py::test_p03_2_stale_buy_report_contradiction_blocks_buy
+FAILED tests/test_p0_batch2_late_execution.py::test_p04_reconcile_before_poll_no_reapply_of_late_lots
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_1_first_ambiguous_growth_sets_uncertain
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_2_repeated_same_lots_poll_keeps_uncertain
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_3_failed_or_contradictory_reconcile_keeps_uncertain
+FAILED tests/test_p0_batch2_late_execution.py::test_p05_4_successful_reconcile_allows_resolution_no_side_effects
+FAILED tests/test_p0_defect_fixes.py::test_scenario_1_partial_buy_cancelled_portfolio_silent
+FAILED tests/test_p0_defect_fixes.py::test_defect1_unavailable_portfolio_with_confirmed_lots_registers
+FAILED tests/test_p0_defect_fixes.py::test_scenario_2_cancelled_with_executed_lots
+FAILED tests/test_p0_defect_fixes.py::test_scenario_3_expired_with_executed_lots
+FAILED tests/test_p0_defect_fixes.py::test_scenario_4_repeated_poll_no_quantity_doubling
+FAILED tests/test_p0_defect_fixes.py::test_scenario_5_late_execution_after_cancel
+FAILED tests/test_p0_defect_fixes.py::test_poll_registers_before_cancel - Typ...
+FAILED tests/test_p0_defect_fixes.py::test_scenario_6_new_order_regularly_polled_reaches_timeout
+FAILED tests/test_p0_defect_fixes.py::test_defect4_unknown_side_resolves_only_without_execution
+FAILED tests/test_p0_defect_fixes.py::test_scenario_14_fill_zero_lots_resolves_after_reconnect
+FAILED tests/test_p0_defect_fixes.py::test_defect8_poll_fill_zero_lots_stays_uncertain
+FAILED tests/test_p0_defect_fixes.py::test_scenario_16_registered_partial_not_added_again
+FAILED tests/test_p0_defect_fixes.py::test_defect2_only_executed_quantity_registered
+FAILED tests/test_persistence.py::test_subprocess_saves_state_then_killed - A...
+FAILED tests/test_persistence.py::test_second_process_restores_state - Assert...
+FAILED tests/test_screener.py::test_screener_returns_top_n - assert None is n...
+FAILED tests/test_screener.py::test_screener_valid_result_less_than_10 - asse...
+FAILED tests/test_screener.py::test_screener_filters_low_turnover - assert 1 ...
+FAILED tests/test_screener.py::test_screener_cache - assert 4 == 1
+FAILED tests/test_screener.py::test_screener_partial_scan_returns_none - asse...
+FAILED tests/test_screener.py::test_screener_error_does_not_return_stale_cache
+FAILED tests/test_strategy.py::test_adx_same_candle_does_not_increase_streak
+FAILED tests/test_strategy.py::test_adx_flips_after_two_new_candles - Attribu...
+FAILED tests/test_strategy.py::test_adx_candidate_reversal_resets_streak - At...
+
+--------------------------------------------------------------------------------
+РАЗДЕЛ 4. Сравнение FAILED: baseline vs final
+--------------------------------------------------------------------------------
+Метод: построчное сравнение отсортированных списков FAILED (сек. 2 и 3).
+
+diff baseline_FAILED final_FAILED: ПУСТ (наборы идентичны, построчно)
+baseline FAILED: 74; final FAILED: 74
+ВЫВОД: НОВЫХ ОШИБОК НЕТ — FAILED-набор не изменился (+20 новых PASS —
+       ровно 20 B2-тестов: passed 566 -> 586, failed 74 -> 74).
+       Единственный collection error (root test_execution.py) —
+       pre-existing артефакт ДЕРЕВА SAMSUNG (копия test_execution.py в корне
+       репозитория ищет execution.py на уровень выше; рабочий аналог —
+       tests/test_execution.py). Ошибка идентична в baseline и final и не
+       связана с интеграцией B2.
+
+Замечание о temp-дереве: samsung_merge_candidate/ — ПАКЕТ ФАЙЛОВ. Тесты
+выполняются в полном дереве Samsung (нужны config.py, logger.py, execution.py,
+order_ledger.py). В чистом temp-дереве (только main.py + тест + docs) коллекция
+тестов невозможна (ModuleNotFoundError: config) — это ожидаемое свойство
+пакета temp, совпадающее с предыдущей поставкой B2.
+================================================================================

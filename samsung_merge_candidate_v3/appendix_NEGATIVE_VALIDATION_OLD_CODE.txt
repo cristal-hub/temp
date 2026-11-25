@@ -1,0 +1,630 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0 -- /home/z/.venv/bin/python3
+metadata: {'Python': '3.12.16', 'Platform': 'Linux-5.10.134-013.15.kangaroo.al8.x86_64-x86_64-with-glibc2.41', 'Packages': {'pytest': '9.0.2', 'pluggy': '1.6.0'}, 'Plugins': {'Faker': '40.1.2', 'metadata': '3.1.1', 'asyncio': '1.3.0', 'ddtrace': '4.2.2', 'cov': '7.0.0', 'json-report': '1.5.0', 'anyio': '4.13.0'}}
+rootdir: /home/z
+configfile: pyproject.toml
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 14 items
+
+test_b2_csv_recovery.py::test_a_actual_commission_recovered_after_csv_write FAILED [  7%]
+test_b2_csv_recovery.py::test_b_execution_price_recovered_after_price_unknown_csv FAILED [ 14%]
+test_b2_csv_recovery.py::test_c_commission_first_then_price FAILED       [ 21%]
+test_b2_csv_recovery.py::test_d_price_first_then_commission FAILED       [ 28%]
+test_b2_csv_recovery.py::test_e_repeated_identical_report_does_not_change_result_twice FAILED [ 35%]
+test_b2_csv_recovery.py::test_f_late_data_after_restart_updates_previous_trade FAILED [ 42%]
+test_b2_csv_recovery.py::test_g_cumulative_pnl_recomputed_for_subsequent_trades FAILED [ 50%]
+test_b2_csv_recovery.py::test_h_repeat_processing_creates_no_csv_duplicate PASSED [ 57%]
+test_b2_csv_recovery.py::test_i_conflicting_price_does_not_overwrite_confirmed_price FAILED [ 64%]
+test_b2_csv_recovery.py::test_j_conflicting_commission_does_not_overwrite_confirmed_commission FAILED [ 71%]
+test_b2_csv_recovery.py::test_k_partial_execution_does_not_reapply_lots PASSED [ 78%]
+test_b2_csv_recovery.py::test_l_failed_csv_update_does_not_corrupt_file FAILED [ 85%]
+test_b2_csv_recovery.py::test_m_missing_or_ambiguous_trade_id_does_not_update_foreign_trade FAILED [ 92%]
+test_b2_csv_recovery.py::test_n_full_process_repeat_gives_same_result_as_single FAILED [100%]
+
+=================================== FAILURES ===================================
+______________ test_a_actual_commission_recovered_after_csv_write ______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_a_actual_commission_recov0')
+
+    def test_a_actual_commission_recovered_after_csv_write(isolated_paths):
+        """Цена известна при закрытии, фактическая комиссия нет: в CSV попадает
+        расчётная (модельная) комиссия. Позднее брокер предоставляет фактическую
+        комиссию — СУЩЕСТВУЮЩАЯ строка обновляется (новая не создаётся):
+        actual_commission_rub/exit_commission_rub восстановлены, commission_source
+        пересчитан (model -> mixed), net P&L пересчитан, лоты и цена не изменены."""
+        tmp_path = isolated_paths
+        monitor, pos, _ = make_closed_logged(tmp_path, trade_id="t-a",
+                                             price=EXIT, commission=None)
+        rows = read_trades_csv(tmp_path)
+        row0 = rows[0]
+        assert row0["exit_price"] == f"{EXIT:.4f}"
+        assert row0["commission_source"] == "model"
+        assert row0["actual_commission_rub"] == ""
+        model_total = model_commission(EXIT)
+        assert row0["exit_commission_rub"] == f"{model_total / 2:.2f}"
+        executed_before = row0["executed_lots"]
+        trade_id_before = row0["trade_id"]
+    
+        # Поздний отчёт: та же заявка/исполнение/цена, фактическая комиссия 1.5.
+        run(main.process_closing(late_client(price=EXIT, commission=1.5), monitor, None))
+    
+        rows = read_trades_csv(tmp_path)
+        assert len(rows) == 1, "обновление НЕ должно создавать новую строку"
+        row = rows[0]
+        # Комиссия восстановлена, расчётная не подменяет фактическую.
+>       assert row["actual_commission_rub"] == "1.50"
+E       AssertionError: assert '' == '1.50'
+E         
+E         - 1.50
+
+test_b2_csv_recovery.py:362: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,250 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+2026-11-24 11:31:46,251 - INFO - [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2326 ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+___________ test_b_execution_price_recovered_after_price_unknown_csv ___________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_b_execution_price_recover0')
+
+    def test_b_execution_price_recovered_after_price_unknown_csv(isolated_paths):
+        """Цена неизвестна при закрытии: CSV с PRICE_UNKNOWN и пустыми финансовыми
+        полями. Позднее брокер предоставляет фактическую цену — строка обновляется:
+        exit_price восстановлен, PRICE_UNKNOWN убран, финансовые поля пересчитаны,
+        накопительный P&L записан, лоты не изменены."""
+        tmp_path = isolated_paths
+        monitor, pos, _ = make_closed_logged(tmp_path, trade_id="t-b",
+                                             price=None, commission=None)
+        row0 = read_trades_csv(tmp_path)[0]
+        assert row0["exit_price"] == ""
+        assert row0["net_pnl_rub"] == "" and row0["gross_pnl_rub"] == ""
+        assert row0["commission_rub"] == ""
+        assert "PRICE_UNKNOWN" in row0["error_note"]
+        assert row0["cumulative_net_pnl_rub"] == ""
+        executed_before = row0["executed_lots"]
+    
+        run(main.process_closing(late_client(price=EXIT, commission=None), monitor, None))
+    
+        rows = read_trades_csv(tmp_path)
+        assert len(rows) == 1
+        row = rows[0]
+>       assert row["exit_price"] == f"{EXIT:.4f}"
+E       AssertionError: assert '' == '110.0000'
+E         
+E         - 110.0000
+
+test_b2_csv_recovery.py:413: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,302 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 11:31:46,302 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2333 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+______________________ test_c_commission_first_then_price ______________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_c_commission_first_then_p0')
+
+    def test_c_commission_first_then_price(isolated_paths):
+        """Цена и комиссия приходят в РАЗНЫЕ моменты. Шаг 1: комиссия известна,
+        цены нет — факт комиссии записывается в существующую строку, P&L остаётся
+        пустым (фиктивный P&L запрещён), PRICE_UNKNOWN сохраняется. Шаг 2: цена
+        подтверждена — полный пересчёт, PRICE_UNKNOWN убран, ранее восстановленная
+        комиссия не затёрта."""
+        tmp_path = isolated_paths
+        monitor, pos, _ = make_closed_logged(tmp_path, trade_id="t-c",
+                                             price=None, commission=None)
+    
+        # --- Шаг 1: поздняя комиссия 1.5 (цены ещё нет) ---
+        run(main.process_closing(late_client(price=None, commission=1.5), monitor, None))
+        rows = read_trades_csv(tmp_path)
+        assert len(rows) == 1
+        row1 = rows[0]
+>       assert row1["actual_commission_rub"] == "1.50"
+E       AssertionError: assert '' == '1.50'
+E         
+E         - 1.50
+
+test_b2_csv_recovery.py:448: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,319 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 11:31:46,319 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2333 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+______________________ test_d_price_first_then_commission ______________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_d_price_first_then_commis0')
+
+    def test_d_price_first_then_commission(isolated_paths):
+        """Зеркальный тесту C порядок: цена подтверждена первой (модельная
+        комиссия в строке), фактическая комиссия приходит позднее и обновляет
+        существующую строку без повторного применения и без дублей."""
+        tmp_path = isolated_paths
+        monitor, pos, _ = make_closed_logged(tmp_path, trade_id="t-d",
+                                             price=None, commission=None)
+    
+        # --- Шаг 1: цена 110 (комиссии нет) — модельная комиссия, P&L записан ---
+        run(main.process_closing(late_client(price=EXIT, commission=None), monitor, None))
+        row1 = read_trades_csv(tmp_path)[0]
+>       assert row1["exit_price"] == f"{EXIT:.4f}"
+E       AssertionError: assert '' == '110.0000'
+E         
+E         - 110.0000
+
+test_b2_csv_recovery.py:493: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,335 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 11:31:46,336 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2333 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+________ test_e_repeated_identical_report_does_not_change_result_twice _________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_e_repeated_identical_repo0')
+
+    def test_e_repeated_identical_report_does_not_change_result_twice(isolated_paths):
+        """Первый поздний отчёт обновил строку; ВТОРОЙ идентичный отчёт не меняет
+        файл ни байтом (идемпотентность обновления CSV)."""
+        tmp_path = isolated_paths
+        monitor, pos, _ = make_closed_logged(tmp_path, trade_id="t-e",
+                                             price=EXIT, commission=None)
+    
+        run(main.process_closing(late_client(price=EXIT, commission=1.5), monitor, None))
+        bytes_after_first = read_trades_bytes(tmp_path)
+        row1 = read_trades_csv(tmp_path)[0]
+>       assert row1["actual_commission_rub"] == "1.50"
+E       AssertionError: assert '' == '1.50'
+E         
+E         - 1.50
+
+test_b2_csv_recovery.py:529: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,351 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+2026-11-24 11:31:46,351 - INFO - [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2326 ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+____________ test_f_late_data_after_restart_updates_previous_trade _____________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_f_late_data_after_restart0')
+
+    def test_f_late_data_after_restart_updates_previous_trade(isolated_paths):
+        """Перезапуск программы: state.json восстанавливает CLOSED+logged позицию
+        с per-order cursor'ом; поздний отчёт брокера корректно обновляет ПРЕЖНЮЮ
+        CSV-строку (дублей нет, восстановление работает и после рестарта)."""
+        tmp_path = isolated_paths
+        monitor, pos, _ = make_closed_logged(tmp_path, trade_id="t-f",
+                                             price=None, commission=None)
+        row0 = read_trades_csv(tmp_path)[0]
+        assert row0["exit_price"] == ""  # PRICE_UNKNOWN при закрытии
+    
+        # --- Перезапуск: export_state -> import_state в новый monitor ---
+        state = monitor.export_state()
+        monitor2 = ExecutionMonitor(FakeClient())
+        monitor2.import_state(state)
+        pos2 = monitor2.positions["F1"]
+        assert pos2.state == PositionState.CLOSED
+        assert pos2.logged is True
+        assert pos2.trade_id == "t-f"
+        assert pos2.close_orders[OID]["confirmed_executed_lots"] == LOTS
+        assert pos2.close_orders[OID]["avg_exec_price"] is None
+    
+        # --- Поздний отчёт после перезапуска: цена + комиссия ---
+        run(main.process_closing(late_client(price=EXIT, commission=1.5), monitor2, None))
+    
+        rows = read_trades_csv(tmp_path)
+        assert len(rows) == 1, "после перезапуска дубли CSV недопустимы"
+        row = rows[0]
+        assert row["trade_id"] == "t-f"  # прежняя сделка обновлена, не создана новая
+>       assert row["exit_price"] == f"{EXIT:.4f}"
+E       AssertionError: assert '' == '110.0000'
+E         
+E         - 110.0000
+
+test_b2_csv_recovery.py:574: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,367 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 11:31:46,368 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2333 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+____________ test_g_cumulative_pnl_recomputed_for_subsequent_trades ____________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_g_cumulative_pnl_recomput0')
+
+    def test_g_cumulative_pnl_recomputed_for_subsequent_trades(isolated_paths):
+        """Три сделки закрыты последовательно (t1 — с модельной комиссией).
+        Поздняя фактическая комиссия t1 меняет её net_pnl — накопительный P&L
+        ВСЕХ последующих сделок (t2, t3) пересчитан в правильном временном
+        порядке; сами сделки t2/t3 не изменены (кроме их cumulative)."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        specs = [
+            ("t-g1", "F1", "sell-1", 110.0, None),   # цена есть, комиссии нет
+            ("t-g2", "F2", "sell-2", 105.0, 2.0),    # цена и комиссия известны
+            ("t-g3", "F3", "sell-3", 108.0, 3.0),    # цена и комиссия известны
+        ]
+        client_states = {}
+        positions = {}
+        for trade_id, figi, oid, price, commission in specs:
+            pos = TrackedPosition(
+                figi=figi, ticker=figi, direction="BUY", entry_price=ENTRY,
+                quantity=LOTS, sl_price=ENTRY * 0.98, tp_price=ENTRY * 1.04,
+                lot_size=1, state=PositionState.OPEN, trade_id=trade_id,
+                price_before_order=ENTRY, close_price_before_order=ENTRY,
+                order_send_time=(datetime.now(timezone.utc)
+                                 - timedelta(hours=1)).isoformat(),
+            )
+            monitor.positions[figi] = pos
+            monitor.add_close_order(pos, oid, LOTS)
+            pos.close_order_request_id = oid
+            pos.close_requested_lots = LOTS
+            assert monitor.apply_close_execution(
+                pos, oid, LOTS, "CANCELLED",
+                execution_price=price, commission=commission,
+                requested_lots=LOTS) is True
+            client_states[oid] = FakeState(
+                status_code=3, lots_executed=LOTS,
+                price_units=price * LOTS, commission=commission)
+            positions[trade_id] = pos
+            client = FakeClient(order_states=client_states)
+            run(main.process_closing(client, monitor, None))
+            assert len(read_trades_csv(tmp_path)) == len(positions)
+    
+        rows = read_trades_csv(tmp_path)
+        assert [r["trade_id"] for r in rows] == ["t-g1", "t-g2", "t-g3"]
+        model_total = model_commission(110.0)
+        net1_model = (110.0 - ENTRY) * LOTS - model_total
+        # net2/net3: фактическая exit-комиссия + МОДЕЛЬНАЯ entry-комиссия
+        # (формула штатной записи CSV: entry = model_total/2 при неизвестной
+        # фактической комиссии входа).
+        model_total2 = model_commission(105.0)
+        net2 = (105.0 - ENTRY) * LOTS - (model_total2 / 2 + 2.0)
+        model_total3 = model_commission(108.0)
+        net3 = (108.0 - ENTRY) * LOTS - (model_total3 / 2 + 3.0)
+        assert rows[0]["net_pnl_rub"] == f"{net1_model:.2f}"
+        # Исходный cumulative штатной записи.
+        cum2_before = float(rows[1]["cumulative_net_pnl_rub"])
+        cum3_before = float(rows[2]["cumulative_net_pnl_rub"])
+        assert cum2_before == pytest.approx(net1_model + net2, abs=0.01)
+        assert cum3_before == pytest.approx(net1_model + net2 + net3, abs=0.01)
+        bytes_before = read_trades_bytes(tmp_path)
+        net2_str_before = rows[1]["net_pnl_rub"]
+        net3_str_before = rows[2]["net_pnl_rub"]
+    
+        # --- Поздняя фактическая комиссия 1.5 для t1 ---
+        client_states["sell-1"] = FakeState(
+            status_code=3, lots_executed=LOTS,
+            price_units=110.0 * LOTS, commission=1.5)
+        run(main.process_closing(FakeClient(order_states=client_states), monitor, None))
+    
+        rows = read_trades_csv(tmp_path)
+        assert len(rows) == 3, "обновление одной сделки не должно создавать строки"
+        net1_new = (110.0 - ENTRY) * LOTS - (model_total / 2 + 1.5)
+>       assert rows[0]["actual_commission_rub"] == "1.50"
+E       AssertionError: assert '' == '1.50'
+E         
+E         - 1.50
+
+test_b2_csv_recovery.py:662: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,384 - INFO - ✅ [CLOSED] F1 None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+2026-11-24 11:31:46,384 - INFO - [notify] 🔒 <b>F1</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+2026-11-24 11:31:46,385 - INFO - ✅ [CLOSED] F2 None entry=100.0000 exit=105.0000 lots=10 gross=+50.00₽ net=+47.49₽ cum=+146.44₽
+2026-11-24 11:31:46,385 - INFO - [notify] 🔒 <b>F2</b> закрыто по None
+Вход: 100.0000 → Выход: 105.0000
+Лотов: 10 (акций: 10)
+Net: <b>+47.49 ₽</b>
+2026-11-24 11:31:46,386 - INFO - ✅ [CLOSED] F3 None entry=100.0000 exit=108.0000 lots=10 gross=+80.00₽ net=+76.48₽ cum=+222.92₽
+2026-11-24 11:31:46,386 - INFO - [notify] 🔒 <b>F3</b> закрыто по None
+Вход: 100.0000 → Выход: 108.0000
+Лотов: 10 (акций: 10)
+Net: <b>+76.48 ₽</b>
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2326 ✅ [CLOSED] F1 None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+INFO     root:main.py:804 [notify] 🔒 <b>F1</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+INFO     root:main.py:2326 ✅ [CLOSED] F2 None entry=100.0000 exit=105.0000 lots=10 gross=+50.00₽ net=+47.49₽ cum=+146.44₽
+INFO     root:main.py:804 [notify] 🔒 <b>F2</b> закрыто по None
+Вход: 100.0000 → Выход: 105.0000
+Лотов: 10 (акций: 10)
+Net: <b>+47.49 ₽</b>
+INFO     root:main.py:2326 ✅ [CLOSED] F3 None entry=100.0000 exit=108.0000 lots=10 gross=+80.00₽ net=+76.48₽ cum=+222.92₽
+INFO     root:main.py:804 [notify] 🔒 <b>F3</b> закрыто по None
+Вход: 100.0000 → Выход: 108.0000
+Лотов: 10 (акций: 10)
+Net: <b>+76.48 ₽</b>
+_________ test_i_conflicting_price_does_not_overwrite_confirmed_price __________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_i_conflicting_price_does_0')
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7f89fb232690>
+
+    def test_i_conflicting_price_does_not_overwrite_confirmed_price(isolated_paths, caplog):
+        """Строка неполна (нет фактической комиссии) — опрос выполняется. Поздний
+        отчёт содержит ДРУГУЮ цену (120 вместо подтверждённой 110) при том же
+        исполнении — противоречие двух достоверных значений: fail-closed, CSV и
+        cursor не изменяются, конфликт зафиксирован."""
+        tmp_path = isolated_paths
+        monitor, pos, _ = make_closed_logged(tmp_path, trade_id="t-i",
+                                             price=EXIT, commission=None)
+        bytes_before = read_trades_bytes(tmp_path)
+        row0 = read_trades_csv(tmp_path)[0]
+        assert row0["exit_price"] == f"{EXIT:.4f}"
+    
+        with caplog.at_level("ERROR"):
+            run(main.process_closing(late_client(price=120.0, commission=None),
+                                     monitor, None))
+    
+        assert read_trades_bytes(tmp_path) == bytes_before, \
+            "противоречивая цена не должна изменять CSV"
+        row = read_trades_csv(tmp_path)[0]
+        assert row["exit_price"] == f"{EXIT:.4f}"
+        assert row["actual_commission_rub"] == ""  # частичное обновление запрещено
+        assert pos.execution_price == pytest.approx(EXIT)
+        assert pos.close_orders[OID]["avg_exec_price"] == pytest.approx(EXIT)
+>       assert "csv-recovery" in caplog.text
+E       AssertionError: assert 'csv-recovery' in 'INFO     root:main.py:2326 ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽\nINFO     root:main.py:804 [notify] 🔒 <b>TEST</b> закрыто по None\nВход: 100.0000 → Выход: 110.0000\nЛотов: 10 (акций: 10)\nNet: <b>+98.95 ₽</b>\n'
+E        +  where 'INFO     root:main.py:2326 ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽\nINFO     root:main.py:804 [notify] 🔒 <b>TEST</b> закрыто по None\nВход: 100.0000 → Выход: 110.0000\nЛотов: 10 (акций: 10)\nNet: <b>+98.95 ₽</b>\n' = <_pytest.logging.LogCaptureFixture object at 0x7f89fb232690>.text
+
+test_b2_csv_recovery.py:723: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,407 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+2026-11-24 11:31:46,407 - INFO - [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2326 ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+____ test_j_conflicting_commission_does_not_overwrite_confirmed_commission _____
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_j_conflicting_commission_0')
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7f89fb234500>
+
+    def test_j_conflicting_commission_does_not_overwrite_confirmed_commission(isolated_paths, caplog):
+        """Комиссия 1.5 подтверждена в cursor/позиции и уже отражена в
+        PRICE_UNKNOWN-строке (цены нет — P&L пуст). Поздний отчёт содержит другую
+        комиссию 2.0 — противоречие двух достоверных значений: fail-closed, CSV и
+        учёт не изменяются, подтверждённая комиссия не перезаписывается."""
+        tmp_path = isolated_paths
+        monitor, pos, _ = make_closed_logged(tmp_path, trade_id="t-j",
+                                             price=None, commission=1.5)
+        bytes_before = read_trades_bytes(tmp_path)
+        row0 = read_trades_csv(tmp_path)[0]
+        assert row0["exit_price"] == ""  # PRICE_UNKNOWN строка: P&L не рассчитан
+        assert row0["commission_rub"] == "" and row0["net_pnl_rub"] == ""
+        # Факт комиссии подтверждён и записан.
+>       assert row0["actual_commission_rub"] == "1.50"
+E       AssertionError: assert '' == '1.50'
+E         
+E         - 1.50
+
+test_b2_csv_recovery.py:745: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,423 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 11:31:46,424 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2333 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+________________ test_l_failed_csv_update_does_not_corrupt_file ________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_l_failed_csv_update_does_0')
+tmp_path = PosixPath('/tmp/pytest-of-z/pytest-29/test_l_failed_csv_update_does_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f89fb2377a0>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7f89fb235b20>
+
+    def test_l_failed_csv_update_does_not_corrupt_file(isolated_paths, tmp_path, monkeypatch, caplog):
+        """Сбой на этапе проверки результата атомарной записи: исходный CSV
+        остаётся целостным (байт-в-байт), временные файлы удалены; следующий
+        успешный цикл выполняет обновление штатно."""
+        monitor, pos, _ = make_closed_logged(tmp_path, trade_id="t-l",
+                                             price=None, commission=None)
+        bytes_before = read_trades_bytes(tmp_path)
+        assert bytes_before, "исходный CSV должен существовать"
+    
+        def _boom(path):
+            raise OSError("имитация сбоя при проверке временного файла")
+    
+        # ВАЖНО: восстанавливаем ТОЛЬКО _read_tmp_rows (не monkeypatch.undo() —
+        # он откатил бы и изоляцию путей фикстуры isolated_paths).
+>       original_read_tmp_rows = research_logger._read_tmp_rows
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'logger' has no attribute '_read_tmp_rows'
+
+test_b2_csv_recovery.py:825: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,442 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 11:31:46,442 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2333 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+______ test_m_missing_or_ambiguous_trade_id_does_not_update_foreign_trade ______
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_m_missing_or_ambiguous_tr0')
+tmp_path = PosixPath('/tmp/pytest-of-z/pytest-29/test_m_missing_or_ambiguous_tr0')
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7f89fb241df0>
+
+    def test_m_missing_or_ambiguous_trade_id_does_not_update_foreign_trade(isolated_paths, tmp_path, caplog):
+        """(1) Позиция без trade_id: случайный идентификатор строки не сохранён —
+        обновление НЕ выполняется (никакая строка не тронута). (2) Дублирующийся
+        trade_id: обновление запрещено (неоднозначность), обе строки не изменены."""
+        tmp_path = isolated_paths
+        # --- (1) отсутствующий trade_id ---
+        monitor, pos, _ = make_closed_logged(tmp_path, trade_id="",
+                                             price=None, commission=None)
+        bytes_before = read_trades_bytes(tmp_path)
+        rows = read_trades_csv(tmp_path)
+        assert len(rows) == 1 and rows[0]["trade_id"], \
+            "штатная запись должна была создать строку со случайным trade_id"
+    
+        run(main.process_closing(late_client(price=EXIT, commission=1.5), monitor, None))
+        assert read_trades_bytes(tmp_path) == bytes_before, \
+            "без стабильного trade_id обновление запрещено"
+    
+        # --- (2) неоднозначный trade_id: две строки с одним trade_id ---
+        monitor2, pos2, _ = make_closed_logged(tmp_path, trade_id="t-dup",
+                                               figi="F2", oid="sell-dup",
+                                               price=EXIT, commission=None)
+        # Легаси-ситуация: ВТОРАЯ строка с тем же trade_id (добавлена вручную).
+        dup = {**{k: "" for k in research_logger.TRADE_FIELDS},
+               "trade_id": "t-dup", "ticker": "OTHER",
+               "net_pnl_rub": "55.00", "cumulative_net_pnl_rub": "55.00"}
+        assert research_logger.log_trade(dup) is True
+        bytes_before_dup = read_trades_bytes(tmp_path)
+        rows = read_trades_csv(tmp_path)
+        assert len(rows) == 3  # случайная (из п.1) + t-dup + дубль t-dup
+    
+        with caplog.at_level("ERROR"):
+            run(main.process_closing(
+                late_client(oid="sell-dup", price=EXIT, commission=2.5),
+                monitor2, None))
+        assert read_trades_bytes(tmp_path) == bytes_before_dup, \
+            "неоднозначный trade_id не должен обновлять ни одну строку"
+        rows = read_trades_csv(tmp_path)
+        assert len(rows) == 3
+        dup_rows = [r for r in rows if r["trade_id"] == "t-dup"]
+        assert len(dup_rows) == 2
+        # Чужая строка (OTHER) не изменена; собственная строка t-dup тоже.
+        assert dup_rows[1]["ticker"] == "OTHER"
+        assert dup_rows[1]["net_pnl_rub"] == "55.00"
+        assert dup_rows[0]["actual_commission_rub"] == ""
+        events = "\n".join(read_events(tmp_path))
+>       assert "CSV_LATE_METADATA_CONFLICT" in events
+E       assert 'CSV_LATE_METADATA_CONFLICT' in '{"timestamp_utc": "2026-11-24T11:31:46.459073+00:00", "event": "CLOSED", "config_profile": "FORCE_TRADE", "commission_mode": "TRADER", "build_version": "v2.3.2-stage1", "trade_id": "220ed065c693", "ticker": "TEST", "figi": "F1", "entry_price": 100.0, "exit_price": null, "executed_lots": 10, "lot_size": 1, "gross_pnl": null, "entry_commission": null, "exit_commission": null, "commission_source": "none", "slippage": 0.0, "slippage_percent": 0.0, "net_pnl": null, "cumulative_net_pnl": null, "exit_reason": "", "pnl_recorded": false}\n{"timestamp_utc": "2026-11-24T11:31:46.460027+00:00", "event": "CLOSED", "config_profile": "FORCE_TRADE", "commission_mode": "TRADER", "build_version": "v2.3.2-stage1", "trade_id": "t-dup", "ticker": "TEST", "figi": "F2", "entry_price": 100.0, "exit_price": 110.0, "executed_lots": 10, "lot_size": 1, "gross_pnl": 100.0, "entry_commission": 0.525, "exit_commission": 0.525, "commission_source": "model", "slippage": -100.0, "slippage_percent": -4.761904761904762, "net_pnl": 98.95, "cumulative_net_pnl": 98.95, "exit_reason": "", "pnl_recorded": true}'
+
+test_b2_csv_recovery.py:897: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,458 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 11:31:46,459 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 11:31:46,459 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+2026-11-24 11:31:46,460 - INFO - [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2333 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+INFO     root:main.py:2326 ✅ [CLOSED] TEST None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+____________ test_n_full_process_repeat_gives_same_result_as_single ____________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-29/test_n_full_process_repeat_giv0')
+tmp_path = PosixPath('/tmp/pytest-of-z/pytest-29/test_n_full_process_repeat_giv0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f89fb242a80>
+
+    def test_n_full_process_repeat_gives_same_result_as_single(isolated_paths, tmp_path, monkeypatch):
+        """Полный процесс восстановления, выполненный дважды, даёт тот же файл,
+        что и однократное выполнение (детерминированность обновления)."""
+        tmp_path = isolated_paths
+    
+        # --- Прогон 1: одиночное обновление ---
+        subdir1 = isolate_subdir(tmp_path, monkeypatch, "one")
+        monitor1, pos1, _ = make_closed_logged(subdir1, trade_id="t-n",
+                                               price=None, commission=None)
+        run(main.process_closing(late_client(price=EXIT, commission=1.5), monitor1, None))
+        bytes_single = read_trades_bytes(subdir1)
+    
+        # --- Прогон 2: два идентичных цикла восстановления подряд ---
+        subdir2 = isolate_subdir(tmp_path, monkeypatch, "two")
+        monitor2, pos2, _ = make_closed_logged(subdir2, trade_id="t-n",
+                                               price=None, commission=None)
+        run(main.process_closing(late_client(price=EXIT, commission=1.5), monitor2, None))
+        run(main.process_closing(late_client(price=EXIT, commission=1.5), monitor2, None))
+        bytes_repeated = read_trades_bytes(subdir2)
+    
+        assert bytes_repeated == bytes_single or _rows_equal_ignoring_time(
+            read_trades_csv(subdir2), read_trades_csv(subdir1)), \
+            f"двойное выполнение = однократному; различия: {_row_diffs(read_trades_csv(subdir1), read_trades_csv(subdir2))}"
+        rows = read_trades_csv(subdir2)
+        assert len(rows) == 1
+>       assert rows[0]["exit_price"] == f"{EXIT:.4f}"
+E       AssertionError: assert '' == '110.0000'
+E         
+E         - 110.0000
+
+test_b2_csv_recovery.py:929: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 11:31:46,477 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 11:31:46,477 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 11:31:46,478 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 11:31:46,478 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2333 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+INFO     root:main.py:2333 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:804 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+=========================== short test summary info ============================
+FAILED test_b2_csv_recovery.py::test_a_actual_commission_recovered_after_csv_write
+FAILED test_b2_csv_recovery.py::test_b_execution_price_recovered_after_price_unknown_csv
+FAILED test_b2_csv_recovery.py::test_c_commission_first_then_price - Assertio...
+FAILED test_b2_csv_recovery.py::test_d_price_first_then_commission - Assertio...
+FAILED test_b2_csv_recovery.py::test_e_repeated_identical_report_does_not_change_result_twice
+FAILED test_b2_csv_recovery.py::test_f_late_data_after_restart_updates_previous_trade
+FAILED test_b2_csv_recovery.py::test_g_cumulative_pnl_recomputed_for_subsequent_trades
+FAILED test_b2_csv_recovery.py::test_i_conflicting_price_does_not_overwrite_confirmed_price
+FAILED test_b2_csv_recovery.py::test_j_conflicting_commission_does_not_overwrite_confirmed_commission
+FAILED test_b2_csv_recovery.py::test_l_failed_csv_update_does_not_corrupt_file
+FAILED test_b2_csv_recovery.py::test_m_missing_or_ambiguous_trade_id_does_not_update_foreign_trade
+FAILED test_b2_csv_recovery.py::test_n_full_process_repeat_gives_same_result_as_single
+========================= 12 failed, 2 passed in 0.50s =========================

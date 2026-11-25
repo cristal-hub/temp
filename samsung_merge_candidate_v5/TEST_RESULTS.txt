@@ -1,0 +1,58 @@
+TEST_RESULTS.txt — samsung_merge_candidate_v5 (v2.3.8-stage1)
+=============================================================
+
+Команда прогонов (все среды):
+  python3 -m pytest -p no:cacheprovider --continue-on-collection-errors -q
+
+1) BASELINE (код v4 = samsung_merge_candidate_v4, до изменений v5)
+   74 failed, 617 passed, 1 error
+   Лог: appendix_BASELINE_FULL_PYTEST.txt
+   FAILED/ERROR набор (по именам): baseline_failed_names.txt — совпадает
+   с финальным набором v4 (74 FAILED + 1 collection error
+   test_execution.py, pre-existing, не связан с B2).
+
+2) FINAL (код v5, после изменений)
+   74 failed, 627 passed, 1 error
+   Лог: appendix_FINAL_FULL_PYTEST.txt
+   Разница с baseline: +10 passed (новые тесты V5); FAILED и
+   ERROR/collection errors сравнены ПО КОНКРЕТНЫМ ИМЕНАМ (не по
+   количеству): наборы ИДЕНТИЧНЫ, новых FAILED/ERROR нет.
+
+3) Прежние B2-тесты (51) на коде v5:
+   test_b2_close_accounting.py (20)
+   test_b2_csv_recovery.py (10)
+   test_b2_terminal_metadata_recovery.py (12)
+   test_b2_v4_accounting_consistency.py (9)
+   => 51 passed. Лог: appendix_B2_TESTS_OUTPUT.txt
+
+4) Новые тесты V5-A..J (10) на коде v5:
+   test_b2_v5_identity_and_timestamp.py => 10 passed.
+   Лог: appendix_V5_TESTS_OUTPUT.txt
+     V5-A lost_sell_response_keeps_request_timestamp        PASSED
+     V5-B cumulative_follows_saved_request_timestamps       PASSED
+     V5-C request_timestamp_survives_restart                PASSED
+     V5-D legacy_state_restores_ts_from_cursor              PASSED
+     V5-E recovery_task_trade_id_mismatch_fail_closed       PASSED
+     V5-F recovery_task_figi_mismatch_fail_closed           PASSED
+     V5-G cursor_identity_mismatch_fail_closed              PASSED
+     V5-H duplicate_trade_id_conflicting_tasks_fail_closed  PASSED
+     V5-I row_identity_mismatch_blocks_update               PASSED
+     V5-J valid_task_after_restart_completes_normally       PASSED
+
+5) НЕГАТИВНАЯ ВАЛИДАЦИЯ: тесты V5 на коде v4 (до исправлений):
+   => 9 failed, 1 passed. Лог: appendix_NEGATIVE_VALIDATION_OLD_CODE.txt
+   V5-A..I падают на v4 (ловят дефекты); V5-J проходит (регрессионный
+   guard: валидная задача не должна блокироваться).
+
+6) Сравнение FAILED/ERROR по именам (baseline vs final):
+   diff baseline_failed_names.txt final_failed_names.txt => пусто
+   (наборы идентичны, ни одного нового/исчезнувшего FAILED;
+    единственный ERROR — pre-existing collection error корневого
+    test_execution.py, идентичен в baseline и final).
+
+STRATEGY LOGIC: UNCHANGED
+RESEARCH ONLY
+NO THRESHOLD IS OPTIMIZED
+NO FILTER IS INSTALLED
+NO LIVE ORDERS
+OOS SEALED / H4 EXECUTION NOT AUTHORIZED

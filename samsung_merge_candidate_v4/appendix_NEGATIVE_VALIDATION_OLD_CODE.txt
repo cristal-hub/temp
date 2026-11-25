@@ -1,0 +1,21 @@
+НЕГАТИВНАЯ ВАЛИДАЦИЯ v4: тест test_b2_v4_accounting_consistency.py (9 тестов V4-A..I)
+на СТАРОМ коде v3 (v3 main.py + v3 execution.py + v3 logger.py @ af7cf3e).
+Ожидание: ВСЕ тесты падают (каждый детектирует дефект, исправленный в v4).
+Результат: 9 failed / 0 passed.
+
+test_b2_v4_accounting_consistency.py::test_v4_f_two_trades_same_figi_reports_not_mixed FAILED [ 66%]
+test_b2_v4_accounting_consistency.py::test_v4_g_recovery_task_survives_restart FAILED [ 77%]
+test_b2_v4_accounting_consistency.py::test_v4_h_identity_conflict_fail_closed FAILED [ 88%]
+test_b2_v4_accounting_consistency.py::test_v4_i_csv_error_keeps_task_and_file_intact FAILED [100%]
+=================================== FAILURES ===================================
+=========================== short test summary info ============================
+FAILED test_b2_v4_accounting_consistency.py::test_v4_a_cumulative_follows_close_chronology_not_file_order
+FAILED test_b2_v4_accounting_consistency.py::test_v4_b_late_commission_change_recomputes_subsequent_cumulative
+FAILED test_b2_v4_accounting_consistency.py::test_v4_c_identical_exit_times_stable_tiebreaker
+FAILED test_b2_v4_accounting_consistency.py::test_v4_d_missing_or_garbage_timestamps_deterministic
+FAILED test_b2_v4_accounting_consistency.py::test_v4_e_new_position_same_figi_keeps_recovery_task
+FAILED test_b2_v4_accounting_consistency.py::test_v4_f_two_trades_same_figi_reports_not_mixed
+FAILED test_b2_v4_accounting_consistency.py::test_v4_g_recovery_task_survives_restart
+FAILED test_b2_v4_accounting_consistency.py::test_v4_h_identity_conflict_fail_closed
+FAILED test_b2_v4_accounting_consistency.py::test_v4_i_csv_error_keeps_task_and_file_intact
+============================== 9 failed in 0.48s ===============================

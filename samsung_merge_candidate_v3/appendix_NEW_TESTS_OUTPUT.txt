@@ -1,0 +1,25 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0 -- /home/z/.venv/bin/python3
+metadata: {'Python': '3.12.16', 'Platform': 'Linux-5.10.134-013.15.kangaroo.al8.x86_64-x86_64-with-glibc2.41', 'Packages': {'pytest': '9.0.2', 'pluggy': '1.6.0'}, 'Plugins': {'Faker': '40.1.2', 'metadata': '3.1.1', 'asyncio': '1.3.0', 'ddtrace': '4.2.2', 'cov': '7.0.0', 'json-report': '1.5.0', 'anyio': '4.13.0'}}
+rootdir: /home/z
+configfile: pyproject.toml
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 14 items
+
+test_b2_csv_recovery.py::test_a_actual_commission_recovered_after_csv_write PASSED [  7%]
+test_b2_csv_recovery.py::test_b_execution_price_recovered_after_price_unknown_csv PASSED [ 14%]
+test_b2_csv_recovery.py::test_c_commission_first_then_price PASSED       [ 21%]
+test_b2_csv_recovery.py::test_d_price_first_then_commission PASSED       [ 28%]
+test_b2_csv_recovery.py::test_e_repeated_identical_report_does_not_change_result_twice PASSED [ 35%]
+test_b2_csv_recovery.py::test_f_late_data_after_restart_updates_previous_trade PASSED [ 42%]
+test_b2_csv_recovery.py::test_g_cumulative_pnl_recomputed_for_subsequent_trades PASSED [ 50%]
+test_b2_csv_recovery.py::test_h_repeat_processing_creates_no_csv_duplicate PASSED [ 57%]
+test_b2_csv_recovery.py::test_i_conflicting_price_does_not_overwrite_confirmed_price PASSED [ 64%]
+test_b2_csv_recovery.py::test_j_conflicting_commission_does_not_overwrite_confirmed_commission PASSED [ 71%]
+test_b2_csv_recovery.py::test_k_partial_execution_does_not_reapply_lots PASSED [ 78%]
+test_b2_csv_recovery.py::test_l_failed_csv_update_does_not_corrupt_file PASSED [ 85%]
+test_b2_csv_recovery.py::test_m_missing_or_ambiguous_trade_id_does_not_update_foreign_trade PASSED [ 92%]
+test_b2_csv_recovery.py::test_n_full_process_repeat_gives_same_result_as_single PASSED [100%]
+
+============================== 14 passed in 0.31s ==============================

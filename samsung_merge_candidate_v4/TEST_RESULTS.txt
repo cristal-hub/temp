@@ -1,0 +1,103 @@
+TEST_RESULTS.txt — samsung_merge_candidate_v4 (v2.3.7-stage1)
+B2 V4: CHRONOLOGICAL CUMULATIVE P&L + PERSISTENT LATE CSV RECOVERY
+Дата: 2026-11-24. Режим: RESEARCH ONLY / NO LIVE ORDERS / SANDBOX.
+
+====================================================================
+1. ОКРУЖЕНИЯ ПРОВЕРКИ
+====================================================================
+Канонические прогоны выполняются в ПОЛНОМ Samsung-дереве @ 051b10f
+(нужны config.py, logger.py, execution.py, order_ledger.py,
+tinkoff_client.py). Чистое дерево пакета (main.py + тесты) не собирается
+(ModuleNotFoundError: config) — ожидаемое свойство пакета, как и у
+предыдущих кандидатов v1/v2/v3.
+
+- baseline-дерево: Samsung @ 051b10f + v3 main.py + v3 execution.py +
+  v3 logger.py + 3 тестовых файла (исходная точка ТЗ = пакет
+  samsung_merge_candidate_v3 @ temp af7cf3e).
+- final-дерево: Samsung @ 051b10f + v4 main.py + v4 execution.py +
+  v4 logger.py + 4 тестовых файла.
+- negative-дерево: Samsung @ 051b10f + v3 main.py + v3 execution.py +
+  v3 logger.py (СТАРЫЙ код) + НОВЫЙ тест test_b2_v4_accounting_consistency.py.
+
+Команда: python3 -m pytest -p no:cacheprovider --continue-on-collection-errors
+(корневой test_execution.py дерева не собирается — pre-existing артефакт,
+копия ищет execution.py на уровень выше; идентичен во всех прогонах).
+
+====================================================================
+2. ПОЛНЫЙ BASELINE PYTEST (до изменений)
+====================================================================
+Результат: 74 failed, 608 passed, 1 error in 10.60s
+Полный лог: appendix_BASELINE_FULL_PYTEST.txt
+Совпадает с финальным прогоном v3-кандидата (74/608/1) — база воспроизведена.
+
+====================================================================
+3. ПОЛНЫЙ FINAL PYTEST (после изменений)
+====================================================================
+Результат: 74 failed, 617 passed, 1 error in 11.32s
+Полный лог: appendix_FINAL_FULL_PYTEST.txt
+FAILED-набор ПОБАЙТНО ИДЕНТИЧЕН baseline (74 строки FAILED, diff пуст —
+сравнение по ИМЕНАМ тестов, не по количеству).
+ERROR-набор идентичен (1 pre-existing collection error корневого
+test_execution.py). Прибавка passed: +9 = ровно новые тесты
+test_b2_v4_accounting_consistency.py. Новых ошибок нет.
+
+====================================================================
+4. B2-НАБОР (все поколения кандидатов)
+====================================================================
+Команда: python3 -m pytest -p no:cacheprovider test_b2_close_accounting.py
+         test_b2_terminal_metadata_recovery.py test_b2_csv_recovery.py
+         test_b2_v4_accounting_consistency.py -v
+Результат в final-дереве: 51 passed (0 failed)
+ - test_b2_close_accounting.py            20/20 PASS (v1, файл байт-идентичен v1)
+ - test_b2_terminal_metadata_recovery.py   8/8 PASS (v2, файл байт-идентичен v2)
+ - test_b2_csv_recovery.py                14/14 PASS (v3, файл байт-идентичен v3)
+ - test_b2_v4_accounting_consistency.py    9/9 PASS (НОВЫЙ, тесты V4-A..I)
+Логи: appendix_B2_TESTS_OUTPUT.txt (51), appendix_V3_TESTS_OUTPUT.txt (42),
+      appendix_V4_TESTS_OUTPUT.txt (9).
+
+====================================================================
+5. НОВЫЕ ТЕСТЫ V4 (test_b2_v4_accounting_consistency.py)
+====================================================================
+V4-A test_v4_a_cumulative_follows_close_chronology_not_file_order    PASSED
+V4-B test_v4_b_late_commission_change_recomputes_subsequent_cumulative  PASSED
+V4-C test_v4_c_identical_exit_times_stable_tiebreaker                PASSED
+V4-D test_v4_d_missing_or_garbage_timestamps_deterministic           PASSED
+V4-E test_v4_e_new_position_same_figi_keeps_recovery_task            PASSED
+V4-F test_v4_f_two_trades_same_figi_reports_not_mixed                PASSED
+V4-G test_v4_g_recovery_task_survives_restart                        PASSED
+V4-H test_v4_h_identity_conflict_fail_closed                         PASSED
+V4-I test_v4_i_csv_error_keeps_task_and_file_intact                  PASSED
+Лог: appendix_V4_TESTS_OUTPUT.txt
+
+====================================================================
+6. НЕГАТИВНАЯ ВАЛИДАЦИЯ (СТАРЫЙ код v3)
+====================================================================
+На дереве с файлами v3 (main.py + execution.py + logger.py v3) НОВЫЙ
+тест-файл даёт: **9 failed / 0 passed** — падают ВСЕ 9 тестов, т.е.
+каждый тест детектирует реальный дефект, исправленный в v4:
+ - V4-A/B/C/D: cumulative считался в порядке файла, не в хронологии;
+   tie-breaker'а не было; exit_time не нёс времени закрытия.
+ - V4-E/F/G: recovery-задача терялась при register() той же FIGI и
+   не переживала перезапуск с последующей регистрацией.
+ - V4-H: fail-closed-механизм для архивных задач отсутствовал.
+ - V4-I: повторная попытка восстановления была невозможна (задача
+   терялась вместе с объектом позиции).
+Лог: appendix_NEGATIVE_VALIDATION_OLD_CODE.txt
+
+====================================================================
+7. СРАВНЕНИЕ FAILED/ERROR baseline vs final (по именам)
+====================================================================
+baseline_failed_sorted.txt == final_failed_sorted.txt (74 строки, diff пуст)
+baseline_error_sorted.txt  == final_error_sorted.txt  (1 строка)
+Подтверждение отсутствия новых регрессий: сравнение ПО ИМЕНАМ тестов,
+не по общему количеству. Каждое отличие baseline/final: +9 passed
+(новые тесты V4) — других отличий нет.
+
+====================================================================
+8. ПРЕДСУЩЕСТВУЮЩИЕ ПАДЕНИЯ (не связаны с B2)
+====================================================================
+74 FAILED — предсуществующие падения полного дерева Samsung @ 051b10f
+(tests/test_strategy.py и др.), идентичны во всех поколениях кандидатов
+(v1/v2/v3/v4) и во всех прогонах baseline/final. 1 ERROR — collection
+error корневого test_execution.py (копия ищет execution.py уровнем
+выше). Эти артефакты НЕ затронуты изменениями v4.

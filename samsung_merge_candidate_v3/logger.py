@@ -1,0 +1,460 @@
+# logger.py
+# Tsclp_v2.1_volatile — журнал событий и сделок.
+# ИЗМЕНЕНО: log_trade() возвращает bool; _ensure_files() защищён от ошибок
+#           (не падает при недоступной директории); log_event не падает.
+# v2.3.0-stage1:
+#   - TRADE_FIELDS дополнены в КОНЕЦ (build_version, entry_sl_price,
+#     entry_tp_price, mae_price, mfe_price, mae_r, mfe_r, r_multiple,
+#     hold_minutes, exit_sl_price);
+#   - log_event добавляет build_version;
+#   - _ensure_files() АВТО-МИГРАЦИЯ шапки: несовпадение шапки существующего
+#     CSV с текущей схемой -> старый журнал переименовывается в
+#     research_trades_<timestamp>.bak.csv (данные сохраняются), создаётся
+#     новый файл с актуальной шапкой. Это закрывает проблему смешения
+#     схем разных сборок в одном CSV навсегда; cumulative после миграции
+#     начинается заново (старый файл остаётся рядом).
+# v2.3.6-stage1 (B2 LATE METADATA CSV RECOVERY):
+
+#   - find_trade_row(trade_id): поиск ЕДИНСТВЕННОЙ строки сделки по
+
+#     стабильному trade_id. Отсутствующий/неоднозначный (дублирующийся)
+
+#     trade_id НЕ обновляется (fail-closed: чужая сделка не затрагивается).
+
+#   - update_trade_row(trade_id, updates): точечное обновление СУЩЕСТВУЮЩЕЙ
+
+#     строки (новая строка НЕ создаётся, trade_id сохраняется) для
+
+#     восстановления поздних фактических данных брокера (цена исполнения,
+
+#     фактическая комиссия), когда CSV уже записан (pos.logged=True).
+
+#     Гарантии целостности:
+
+#       * АТОМАРНОСТЬ: полный набор строк пишется во временный файл в той
+
+#         же директории, затем fsync + os.replace. При любой ошибке записи,
+
+#         проверки результата или пересчёта исходный файл остаётся
+
+#         нетронутым (временный файл удаляется).
+
+#       * ИДЕМПОТЕНТНОСТЬ: если применение updates (включая пересчёт
+
+#         cumulative) не меняет ни одной строки — файл не переписывается.
+
+#       * ПЕРЕСЧЁТ НАКОПИТЕЛЬНОГО P&L: после обновления строки
+
+#         cumulative_net_pnl_rub пересчитывается для ВСЕХ строк с
+
+#         непустым net_pnl_rub в порядке файла (хронологическом порядке
+
+#         закрытий) — позднее изменение финансового результата старой
+
+#         сделки корректно отражается в накопительной статистике всех
+
+#         последующих сделок.
+
+#       * СХЕМА CSV НЕ ИЗМЕНЯЕТСЯ: столбцы и их порядок прежние
+
+#         (TRADE_FIELDS); неизменённые строки не затрагиваются;
+
+#         обрезанная/битая строка (крах в момент append) дополняется
+
+#         пустыми полями без удаления (данные не теряются).
+
+
+import csv
+import json
+import logging
+import os
+import tempfile
+from datetime import datetime, timezone
+from typing import Optional
+
+import config
+
+EVENTS_FILE = "research_events.jsonl"
+TRADES_FILE = "research_trades.csv"
+
+TRADE_FIELDS = [
+    "trade_id", "timestamp_utc", "ticker", "figi", "lot_size",
+    "side", "signal_reason", "signal_time",
+    "price_before_order", "order_send_time", "order_id",
+    "execution_status", "requested_lots", "executed_lots",
+    "execution_price", "exit_reason", "exit_price", "exit_time",
+    "commission_rub", "commission_source", "actual_commission_rub",
+    "entry_commission_rub", "exit_commission_rub",
+    "slippage_rub", "slippage_percent",
+    "gross_pnl_rub", "net_pnl_rub", "cumulative_net_pnl_rub",
+    "error_note",
+    # --- v2.3.0-stage1: расширенная телеметрия позиции (только в конец) ---
+    "build_version", "entry_sl_price", "entry_tp_price",
+    "mae_price", "mfe_price", "mae_r", "mfe_r",
+    "r_multiple", "hold_minutes", "exit_sl_price",
+]
+
+
+def _file_is_empty_or_header_only(path: str) -> bool:
+    if not os.path.isfile(path):
+        return True
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.reader(f, delimiter=";")
+            rows = list(reader)
+        return len(rows) <= 1
+    except Exception:
+        return False
+
+
+def _csv_header_matches(path: str) -> bool:
+    """True, если первая строка файла совпадает с текущей шапкой TRADE_FIELDS."""
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            first = f.readline().rstrip("\r\n")
+        if not first:
+            return False
+        return first == ";".join(TRADE_FIELDS)
+    except Exception:
+        return False
+
+
+def _ensure_files() -> bool:
+    """Создаёт файлы при необходимости. Несовпадение шапки CSV — авто-миграция:
+    старый журнал переименовывается в research_trades_<timestamp>.bak.csv,
+    создаётся новый с актуальной шапкой. Возвращает True при успехе."""
+    try:
+        if not os.path.isfile(EVENTS_FILE):
+            with open(EVENTS_FILE, "w", encoding="utf-8"):
+                pass
+        if not os.path.isfile(TRADES_FILE):
+            with open(TRADES_FILE, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=TRADE_FIELDS, delimiter=";")
+                writer.writeheader()
+        elif _file_is_empty_or_header_only(TRADES_FILE):
+            # пустой или только шапка — просто переписываем с текущей схемой
+            with open(TRADES_FILE, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=TRADE_FIELDS, delimiter=";")
+                writer.writeheader()
+        elif not _csv_header_matches(TRADES_FILE):
+            # v2.3.0-stage1: схема изменилась — данные не теряем, мигрируем
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            backup = TRADES_FILE.replace(".csv", f"_{stamp}.bak.csv")
+            os.replace(TRADES_FILE, backup)
+            logging.warning(
+                f"[logger] Шапка {TRADES_FILE} не совпадает с текущей схемой — "
+                f"старый журнал сохранён как {backup}; создан новый файл "
+                f"(сбор начинается заново, cumulative сброшен)"
+            )
+            with open(TRADES_FILE, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=TRADE_FIELDS, delimiter=";")
+                writer.writeheader()
+        return True
+    except Exception as e:
+        logging.error(f"[logger] Не удалось подготовить файлы: {e}")
+        return False
+
+
+def log_event(event_type: str, payload: dict) -> bool:
+    """Записывает событие в JSONL. Возвращает True при успехе."""
+    if not _ensure_files():
+        return False
+    record = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "event": event_type,
+        "config_profile": getattr(config, "PROFILE", "?"),
+        "commission_mode": getattr(config, "COMMISSION_MODE", "?"),
+        "build_version": getattr(config, "BUILD_VERSION", "?"),
+        **payload,
+    }
+    try:
+        with open(EVENTS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return True
+    except Exception as e:
+        logging.error(f"[logger] Не удалось записать событие: {e}")
+        return False
+
+
+def log_trade(trade: dict) -> bool:
+    """Записывает сделку в CSV. Возвращает True при успехе, False при ошибке."""
+    if not _ensure_files():
+        return False
+    row = {field: trade.get(field, "") for field in TRADE_FIELDS}
+    try:
+        with open(TRADES_FILE, "a", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=TRADE_FIELDS, delimiter=";")
+            writer.writerow(row)
+        return True
+    except Exception as e:
+        logging.error(f"[logger] Не удалось записать сделку: {e}")
+        return False
+
+
+def _read_all_trade_rows():
+    """v2.3.6-stage1: читает ВСЕ строки research_trades.csv в память.
+
+    Возвращает (rows, fieldnames):
+      rows       — список dict-строк (csv.DictReader, delimiter=";");
+      fieldnames — шапка файла (список столбцов).
+    При ошибке чтения возвращает (None, None) — вызывающий код обязан
+    трактовать это как "обновление невозможно, файл не трогать"
+    (fail-closed). Обрезанные строки (крах во время append) читаются
+    как есть: недостающие поля отсутствуют в dict — дополняются пустыми
+    значениями при записи.
+    """
+    try:
+        if not os.path.isfile(TRADES_FILE):
+            return None, None
+        with open(TRADES_FILE, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f, delimiter=";")
+            fieldnames = list(reader.fieldnames or [])
+            rows = [dict(r) for r in reader]
+        if not fieldnames or "trade_id" not in fieldnames:
+            return None, None
+        return rows, fieldnames
+    except Exception as e:
+        logging.error(
+            f"[logger] Не удалось прочитать {TRADES_FILE}: {type(e).__name__}: {e}")
+        return None, None
+
+
+def find_trade_row(trade_id: str):
+    """v2.3.6-stage1: поиск строки сделки по стабильному trade_id.
+
+    Возвращает (status, row):
+      "found"     — ровно одна строка с этим trade_id (row — её копия);
+      "missing"   — trade_id пустой / файла нет / строк с ним нет;
+      "ambiguous" — НЕСКОЛЬКО строк с этим trade_id: обновление ЗАПРЕЩЕНО
+                    (fail-closed: неоднозначный trade_id не должен привести
+                    к обновлению чужой сделки);
+      "error"     — файл не читается / нет колонки trade_id.
+    """
+    if not trade_id:
+        return "missing", None
+    rows, _fieldnames = _read_all_trade_rows()
+    if rows is None:
+        return "error", None
+    matches = [r for r in rows if r.get("trade_id") == trade_id]
+    if not matches:
+        return "missing", None
+    if len(matches) > 1:
+        return "ambiguous", None
+    return "found", dict(matches[0])
+
+
+def _recompute_cumulative(rows):
+    """v2.3.6-stage1: пересчёт cumulative_net_pnl_rub для ВСЕХ строк в порядке
+    файла (хронологическом порядке закрытий).
+
+    Строки с пустым/нечисловым net_pnl_rub (PRICE_UNKNOWN) не меняются
+    (их cumulative остаётся как был — обычно пустой) и в сумму не входят.
+    Значения парсятся из строк CSV (уже округлены до 2 знаков при записи) —
+    пересчёт детерминирован содержимым файла: повторный запуск даёт тот же
+    результат, что и однократный.
+
+    Возвращает True, если хотя бы одна строка изменилась."""
+    changed = False
+    running = 0.0
+    for row in rows:
+        raw = str(row.get("net_pnl_rub") or "").strip()
+        if not raw:
+            continue
+        try:
+            value = float(raw.replace(",", ".").replace(" ", ""))
+        except (TypeError, ValueError):
+            continue
+        running += value
+        new_cum = f"{running:.2f}"
+        if row.get("cumulative_net_pnl_rub", "") != new_cum:
+            row["cumulative_net_pnl_rub"] = new_cum
+            changed = True
+    return changed
+
+
+def _read_tmp_rows(path: str):
+    """v2.3.6-stage1: чтение временного CSV для проверки результата записи.
+    Возвращает (rows, fieldnames) как _read_all_trade_rows, но по явному
+    пути (проверяем содержимое временного файла, а не рабочего)."""
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f, delimiter=";")
+            fieldnames = list(reader.fieldnames or [])
+            rows = [dict(r) for r in reader]
+        return rows, fieldnames
+    except Exception as e:
+        logging.error(
+            f"[logger] не удалось перечитать временный CSV: "
+            f"{type(e).__name__}: {e}")
+        return None, None
+
+
+def _write_all_trade_rows_atomic(rows, fieldnames, expect_rows):
+    """v2.3.6-stage1: атомарная перезапись research_trades.csv через
+    временный файл с проверкой результата.
+
+    Шаги: запись ВСЕГО набора строк во временный файл в ТОЙ ЖЕ директории
+    (tempfile.mkstemp) -> flush + fsync -> закрытие -> ПРОВЕРКА результата
+    (перечитать временный файл: шапка совпадает, число строк данных равно
+    исходному) -> os.replace (атомарная подмена) -> fsync директории
+    (best-effort).
+
+    При ЛЮБОЙ ошибке на любом шаге временный файл удаляется, исходный файл
+    НЕ изменяется — возвращается False (fail-closed: прерванное обновление
+    не повреждает исходный файл).
+
+    Обрезанные/битые строки нормализуются: недостающие поля заполняются
+    пустыми, лишние ключи отбрасываются с warning (данные строк не
+    теряются, мусорные столбцы не попадают в файл)."""
+    tmp_path = None
+    try:
+        dir_name = os.path.dirname(os.path.abspath(TRADES_FILE)) or "."
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".research_trades_", suffix=".tmp", dir=dir_name)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=";")
+            writer.writeheader()
+            for row in rows:
+                clean = {}
+                for name in fieldnames:
+                    value = row.get(name, "")
+                    clean[name] = "" if value is None else str(value)
+                dropped = [k for k in row.keys()
+                           if k is not None and k not in fieldnames]
+                if dropped:
+                    logging.warning(
+                        f"[logger] строка CSV содержит столбцы вне схемы "
+                        f"({dropped}) — лишние значения отброшены при "
+                        f"перезаписи (схема не менялась)")
+                writer.writerow(clean)
+            f.flush()
+            os.fsync(f.fileno())
+        # --- Проверка результата ДО подмены исходного файла ---
+        check_rows, check_fields = _read_tmp_rows(tmp_path)
+        if check_rows is None or check_fields != fieldnames:
+            logging.error(
+                "[logger] проверка временного CSV не пройдена "
+                "(чтение/шапка) — исходный файл не изменён")
+            return False
+        if len(check_rows) != expect_rows:
+            logging.error(
+                f"[logger] проверка временного CSV не пройдена: строк "
+                f"{len(check_rows)}, ожидалось {expect_rows} — "
+                f"исходный файл не изменён")
+            return False
+        os.replace(tmp_path, TRADES_FILE)
+        tmp_path = None
+        try:
+            dir_fd = os.open(dir_name, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass  # fsync директории — best-effort
+        return True
+    except Exception as e:
+        logging.error(
+            f"[logger] атомарная перезапись {TRADES_FILE} не удалась: "
+            f"{type(e).__name__}: {e} — исходный файл не изменён")
+        return False
+    finally:
+        if tmp_path and os.path.isfile(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def update_trade_row(trade_id: str, updates: dict):
+    """v2.3.6-stage1 (B2 LATE METADATA CSV RECOVERY): обновляет СУЩЕСТВУЮЩУЮ
+    строку сделки по стабильному trade_id и пересчитывает накопительный P&L
+    для всех последующих сделок.
+
+    Реализованные гарантии ТЗ:
+      * обновляется существующая строка, НОВАЯ НЕ СОЗДАЁТСЯ;
+      * исходный trade_id сохраняется (перезапись столбца trade_id
+        запрещена — стабильный идентификатор сделки);
+      * ровно ОДНА строка-кандидат: отсутствие ("missing") или
+        неоднозначность ("ambiguous") trade_id — обновление ЗАПРЕЩЕНО,
+        чужие сделки не затрагиваются (fail-closed);
+      * идемпотентность: применение updates, не меняющее ни одной строки
+        (включая пересчёт cumulative), НЕ перезаписывает файл;
+      * атомарность: временный файл + fsync + os.replace + проверка
+        результата; при сбое исходный файл остаётся целостным;
+      * пересчёт накопительного P&L всех последующих сделок в правильном
+        временном порядке (_recompute_cumulative).
+
+    updates — dict {column: new_value}; обновляются ТОЛЬКО перечисленные
+    столбцы, остальные сохраняются.
+
+    Возвращает (status, row):
+      "updated"   — строка обновлена, файл перезаписан атомарно;
+      "unchanged" — применение updates не меняет файл (идемпотентный повтор);
+      "missing" / "ambiguous" / "error" — обновление не выполнено;
+      row — новая (обновлённая) копия строки при "updated"/"unchanged",
+            иначе None.
+    """
+    rows, fieldnames = _read_all_trade_rows()
+    if rows is None:
+        return "error", None
+    if not trade_id:
+        return "missing", None
+    match_indexes = [i for i, r in enumerate(rows)
+                     if r.get("trade_id") == trade_id]
+    if not match_indexes:
+        return "missing", None
+    if len(match_indexes) > 1:
+        logging.error(
+            f"[logger] trade_id={trade_id}: в CSV найдено "
+            f"{len(match_indexes)} строк — обновление запрещено "
+            f"(неоднозначный trade_id, fail-closed: чужая сделка "
+            f"не обновляется)")
+        return "ambiguous", None
+    idx = match_indexes[0]
+    target = rows[idx]
+    if "trade_id" in (updates or {}):
+        logging.error(
+            f"[logger] trade_id={trade_id}: попытка перезаписи столбца "
+            f"trade_id — запрещено (стабильный идентификатор сделки)")
+        return "error", None
+    before = dict(target)
+    for key, value in (updates or {}).items():
+        target[key] = "" if value is None else str(value)
+    row_changed = target != before
+    # Пересчёт накопительного P&L по всему файлу (порядок файла = порядок
+    # закрытий). Изменение net_pnl_rub обновлённой строки отражается и в
+    # cumulative всех последующих сделок.
+    cumulative_changed = _recompute_cumulative(rows)
+    if not row_changed and not cumulative_changed:
+        return "unchanged", dict(target)
+    changed_fields = [k for k in (updates or {})
+                      if before.get(k) != target.get(k)]
+    ok = _write_all_trade_rows_atomic(rows, fieldnames, expect_rows=len(rows))
+    if not ok:
+        return "error", None
+    logging.info(
+        f"[logger] trade_id={trade_id}: строка сделки обновлена "
+        f"(поля: {', '.join(changed_fields) or '—'}); файл перезаписан "
+        f"атомарно ({len(rows)} строк данных)")
+    return "updated", dict(target)
+
+
+def get_cumulative_net_pnl() -> float:
+    if not os.path.isfile(TRADES_FILE):
+        return 0.0
+    total = 0.0
+    try:
+        with open(TRADES_FILE, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f, delimiter=";")
+            for row in reader:
+                v = row.get("net_pnl_rub", "")
+                if not v:
+                    continue
+                try:
+                    total += float(v.replace(",", ".").replace(" ", ""))
+                except (ValueError, AttributeError):
+                    continue
+    except Exception as e:
+        logging.warning(f"[logger] Не удалось посчитать cumulative: {e}")
+    return total

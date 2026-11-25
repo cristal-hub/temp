@@ -1,0 +1,622 @@
+--- /home/z/my-project/download/samsung_merge_candidate_v4/main.py	2026-11-24 12:54:45.000000000 +0000
++++ env_final_v5/main.py	2026-11-24 14:42:22.655117513 +0000
+@@ -1,6 +1,51 @@
+ # main.py
+ # Tsclp_v2.2_volatile — основной цикл (ТОЛЬКО ПЕСОЧНИЦА).
+ #
++# ИЗМЕНЕНИЯ (v2.3.8-stage1 — B2 V5: CLOSE TIMESTAMP + RECOVERY IDENTITY
++# VALIDATION; база v2.3.7-stage1 = samsung_merge_candidate_v4):
++#   Дефект A — потеря времени запроса закрытия при потерянном ответе SELL.
++#     close_position(): клиентский UUID создавался до отправки SELL, но
++#     pos.close_requested_at устанавливался ТОЛЬКО после post_market_order()
++#     при result.state != None; при result.state is None выход БЕЗ
++#     сохранения timestamp. Позднее восстановленное закрытие писало в CSV
++#     exit_time = момент восстановления, искажая хронологию cumulative P&L.
++#     Исправление: ЕДИНОЕ время запроса создаётся ОДИН раз ДО
++#     post_market_order(); после успешной регистрации intent+cursor одно
++#     и то же значение сохраняется в pos.close_requested_at И
++#     close_orders[request_id]["requested_at"]; при result.state is None
++#     timestamp сохраняется; при получении ответа брокера НЕ перезаписывается.
++#     Для старых state.json без close_requested_at, но с собственным
++#     cursor'ом close-заявки, timestamp восстанавливается из
++#     cursor.requested_at (_close_request_ts; время текущего запуска НЕ
++#     подставляется вместо доступного timestamp из cursor).
++#     СЕМАНТИКА: requested_at — время ЗАПРОСА SELL, НЕ время фактического
++#     исполнения. Используемый API-контур (sandbox.get_sandbox_order_state)
++#     подтверждённого времени исполнения сделки не возвращает — время
++#     исполнения не выдумывается; request timestamp — ЯВНО обозначенный
++#     детерминированный proxy времени закрытия.
++#   Дефект B — fail-closed проверка идентичности recovery-задачи.
++#     import_state() восстанавливал снимок задачи через
++#     TrackedPosition.from_dict(), но не проверял согласованность внешней
++#     записи и снимка: process_closing() использует rec["trade_id"] для
++#     проверки завершения, а _recover_late_csv_metadata() —
++#     task_pos.trade_id из снимка; при несовпадении задача могла обновить
++#     одну строку CSV, а завершиться по состоянию другой.
++#     Исправление (execution.py + main.py): каждая задача
++#     pending_csv_recoveries при импорте И перед обработкой проверяется
++#     (validate_recovery_identity): rec.trade_id == снимок.trade_id,
++#     rec.figi == снимок.figi, наличие стабильного trade_id, наличие СВОЕЙ
++#     close-заявки, согласованность идентификаторов заявки и per-order
++#     cursor'а (trade_id/FIGI/сторона). Любое противоречие — fail-closed:
++#     брокер НЕ опрашивается, CSV НЕ изменяется, другая позиция НЕ
++#     обновляется, задача НЕ удаляется как завершённая — остаётся с
++#     персистентным маркером "conflict" (state.json) и событием
++#     CSV_RECOVERY_TASK_CONFLICT. Дубликаты trade_id: идентичные — дедуп
++#     (детерминированно); конфликтующие (разные снимки/close-ID) — ОБЕ
++#     остаются заблокированными, произвольный выбор запрещён. CSV-строка
++#     перед обновлением сверяется со снимком (FIGI и order_id) —
++#     противоречащая строка не обновляется (CSV_LATE_METADATA_CONFLICT:
++#     row_figi_mismatch / row_order_id_mismatch).
++#
+ # ИЗМЕНЕНИЯ (v2.3.6-stage1 — B2 FINAL ACCOUNTING CONSISTENCY AUDIT +
+ # LATE METADATA CSV RECOVERY):
+ #   Дефект: process_closing() записывает CSV-строку закрытия ОДИН раз
+@@ -1159,10 +1204,22 @@
+             "closed_entry_order_ids": data.get("closed_entry_order_ids", []),
+             # v2.3.7-stage1 (B2 V4): незавершённые recovery-задачи закрытых
+             # сделок. Старый state.json без ключа -> пустой список
+-            # (обратная совместимость); повреждённые записи отбрасываются
+-            # в import_state с журналом (fail-closed по записи).
++            # (обратная совместимость). v2.3.8-stage1 (B2 V5, Defect B):
++            # каждая задача проверяется на согласованность идентификаторов
++            # (внешняя запись <-> снимок <-> per-order cursor); противоречивая
++            # остаётся с маркером "conflict" и не обрабатывается (fail-closed).
+             "pending_csv_recoveries": data.get("pending_csv_recoveries", []),
+         })
++        # v2.3.8-stage1 (B2 V5, Defect B): диагностические события по каждой
++        # конфликтной recovery-задаче (причина конфликта — из маркера).
++        for _rec in (monitor.pending_csv_recoveries or []):
++            if _rec.get("conflict"):
++                research_logger.log_event("CSV_RECOVERY_TASK_CONFLICT", {
++                    "trade_id": _rec.get("trade_id"),
++                    "figi": _rec.get("figi"),
++                    "reason": _rec.get("conflict"),
++                    "stage": "import_state",
++                })
+         risk = data.get("risk", {})
+         if isinstance(risk, dict):
+             rm.import_state(risk)
+@@ -2028,6 +2085,17 @@
+     # При ошибке записи закрытие откладывается: позиция остаётся CLOSING ->
+     # resolve_closing -> UNCERTAIN -> сверка вернёт её в OPEN и SL/TP повторятся.
+     close_order_request_id = str(uuid.uuid4())
++    # v2.3.8-stage1 (B2 V5, Defect A): ЕДИНОЕ время ЗАПРОСА закрытия —
++    # создаётся ОДИН раз ДО отправки SELL и до сетевого вызова; одно и то же
++    # значение сохраняется в pos.close_requested_at и в
++    # close_orders[request_id]["requested_at"]. Раньше timestamp создавался
++    # отдельными вызовами datetime.now() (в add_close_order и на успешной
++    # ветке после ответа), а при result.state is None вообще не сохранялся —
++    # позднее восстановленное закрытие писало в CSV exit_time = время
++    # восстановления, искажая хронологию cumulative P&L.
++    # ВАЖНО (семантика): это время ЗАПРОСА SELL, а НЕ подтверждённое время
++    # фактического исполнения сделки (см. шапку process_closing).
++    close_requested_at = datetime.now(timezone.utc).isoformat()
+     if ledger_ref is not None:
+         intent_ok = ledger_ref.record_intent(
+             close_order_request_id, trade_id=pos.trade_id, figi=pos.figi,
+@@ -2050,7 +2118,7 @@
+         try:
+             monitor.add_close_order(
+                 pos, close_order_request_id, pos.quantity,
+-                datetime.now(timezone.utc).isoformat(),
++                close_requested_at,
+             )
+         except ValueError as exc:
+             logging.error(
+@@ -2067,6 +2135,11 @@
+             pos.state = PositionState.UNCERTAIN
+             client.uncertain_state = True
+             return
++    # v2.3.8-stage1 (B2 V5, Defect A): после успешной регистрации intent
++    # (реестр) и per-order cursor'а (add_close_order) единый timestamp
++    # сохраняется в позиции ДО сетевого вызова — он переживает потерю ответа
++    # брокера (result.state is None) и перезапуск (state.json).
++    pos.close_requested_at = close_requested_at
+ 
+     result = await client.post_market_order(pos.figi, pos.quantity, direction, order_id=close_order_request_id)
+     # ЭТАП 5Б (§5.2): биржевой ID — ТОЛЬКО настоящий ID из ответа брокера.
+@@ -2078,6 +2151,8 @@
+         client.uncertain_state = True
+         # close_order_request_id УЖЕ сохранён в позиции до отправки;
+         # close_order_id остаётся пустым (биржевой ID неизвестен).
++        # v2.3.8-stage1 (B2 V5, Defect A): close_requested_at ТАКЖЕ сохранён
++        # до отправки — время запроса SELL не теряется при потере ответа.
+         if ledger_ref is not None:
+             ledger_ref.record_uncertain(
+                 close_order_request_id, trade_id=pos.trade_id, figi=pos.figi, ticker=pos.ticker,
+@@ -2111,7 +2186,9 @@
+     # остаётся пустым до получения настоящего биржевого ID (§6 миграции).
+     pos.close_order_id = str(exchange_order_id) if exchange_order_id else None
+     pos.close_requested_lots = pos.quantity
+-    pos.close_requested_at = datetime.now(timezone.utc).isoformat()
++    # v2.3.8-stage1 (B2 V5, Defect A): pos.close_requested_at УЖЕ содержит
++    # единое время запроса закрытия (создано ДО отправки SELL). НЕ
++    # перезаписывается временем получения ответа брокера.
+     logging.info(
+         f"🔒 [CLOSE] {pos.ticker} {pos.close_reason} @ {price:.4f} → CLOSING "
+         f"(request_id={close_order_request_id}, exchange_id={exchange_order_id or '—'}, "
+@@ -2373,6 +2450,38 @@
+                 })
+         return
+ 
++    # --- 1а. v2.3.8-stage1 (B2 V5, Defect B): проверка идентичности СТРОКИ ---
++    # Найденная по trade_id строка должна совпадать со сделкой снимка и по
++    # FIGI, и по сохранённому order_id (клиентский UUID close-заявки). Если
++    # строка противоречит снимку СТАРОЙ сделки — обновление ЗАПРЕЩЕНО:
++    # чужая строка не изменяется, событие конфликта записывается (fail-closed).
++    row_figi = str(old_row.get("figi") or "").strip()
++    if row_figi and row_figi != str(pos.figi or "").strip():
++        logging.error(
++            f"[csv-recovery] {pos.ticker}: строка trade_id={trade_id} имеет "
++            f"figi={row_figi}, снимок сделки — {pos.figi}: чужая строка не "
++            f"обновляется (fail-closed)")
++        research_logger.log_event("CSV_LATE_METADATA_CONFLICT", {
++            "figi": pos.figi, "ticker": pos.ticker, "trade_id": trade_id,
++            "reason": "row_figi_mismatch",
++            "row_figi": row_figi, "snapshot_figi": pos.figi,
++        })
++        return
++    row_oid = str(old_row.get("order_id") or "").strip()
++    own_oids = {str(req_id or "").strip(), str(exch_id or "").strip()} - {""}
++    if row_oid and own_oids and row_oid not in own_oids:
++        logging.error(
++            f"[csv-recovery] {pos.ticker}: строка trade_id={trade_id} "
++            f"содержит order_id={row_oid}, не совпадающий с close-заявкой "
++            f"снимка ({sorted(own_oids)}): чужая строка не обновляется "
++            f"(fail-closed)")
++        research_logger.log_event("CSV_LATE_METADATA_CONFLICT", {
++            "figi": pos.figi, "ticker": pos.ticker, "trade_id": trade_id,
++            "reason": "row_order_id_mismatch",
++            "row_order_id": row_oid, "snapshot_order_ids": sorted(own_oids),
++        })
++        return
++
+     # --- 2. Нужен ли опрос: неполные подтверждённые данные в строке ---
+     row_price = str(old_row.get("exit_price") or "").strip()
+     row_actual_comm = str(old_row.get("actual_commission_rub") or "").strip()
+@@ -2505,6 +2614,45 @@
+         _csv_recovery_once(pos, f"update_unchanged:{trade_id}")
+ 
+ 
++def _close_request_ts(pos) -> Optional[str]:
++    """v2.3.8-stage1 (B2 V5, Defect A): время ЗАПРОСА закрытия позиции —
++    ЕДИНЫЙ источник для CSV (timestamp_utc и exit_time).
++
++    Детерминированная цепочка (только сохранённые данные, БЕЗ подстановок
++    текущего времени запуска):
++      1) pos.close_requested_at — единый timestamp, созданный в
++         close_position() ДО отправки SELL и сохранённый даже при потере
++         ответа брокера (result.state is None);
++      2) requested_at СВОЕГО per-order cursor'а close-заявки
++         (close_orders[close_order_request_id/close_order_id]["requested_at"])
++         — для старых state.json, где close_requested_at отсутствует, но
++         cursor собственный close-заявки есть (ТЗ V5, п.2.7/2.8);
++      3) None — вызывающий код применяет собственную политику (для CSV —
++         момент записи строки, единственная доступная оценка для закрытий
++         без своей заявки B3 / полностью легаси-позиций; НЕ скрытая
++         подстановка при пересчёте).
++
++    СЕМАНТИКА (ТЗ V5, п.2.9): requested_at — время ЗАПРОСА SELL, а НЕ
++    подтверждённое время фактического исполнения сделки; оно используется
++    как ЯВНО обозначенный детерминированный proxy времени закрытия.
++    Используемый T-Invest API в этом контуре (sandbox.get_sandbox_order_state)
++    подтверждённого времени исполнения сделки не возвращает (OrderState
++    содержит только статус/cumulative/цену/комиссию), поэтому время
++    исполнения НЕ выдумывается — восстанавливается время запроса."""
++    ts = str(getattr(pos, "close_requested_at", None) or "").strip()
++    if ts:
++        return ts
++    oid = str(getattr(pos, "close_order_request_id", None)
++              or getattr(pos, "close_order_id", None) or "").strip()
++    if not oid:
++        return None
++    cursor = (getattr(pos, "close_orders", {}) or {}).get(oid)
++    if not isinstance(cursor, dict):
++        return None
++    cur_ts = str(cursor.get("requested_at") or "").strip()
++    return cur_ts or None
++
++
+ async def process_closing(client: TinkoffClient, monitor: ExecutionMonitor, rm: Optional[RiskManager] = None):
+     global reconcile_done
+ 
+@@ -2707,7 +2855,15 @@
+ 
+         trade_row = {
+             "trade_id": trade_id,
+-            "timestamp_utc": pos.close_requested_at or "",
++            # v2.3.8-stage1 (B2 V5, Defect A): timestamp_utc/exit_time —
++            # сохранённое время ЗАПРОСА закрытия (_close_request_ts):
++            # pos.close_requested_at, при его отсутствии (старый state.json)
++            # — requested_at собственного cursor'а close-заявки; для
++            # закрытий без своей заявки (B3) и полностью легаси-позиций —
++            # момент записи строки (единственная доступная оценка; НЕ
++            # скрытая подстановка при пересчёте). НЕ время фактического
++            # исполнения сделки.
++            "timestamp_utc": _close_request_ts(pos) or "",
+             "ticker": pos.ticker, "figi": pos.figi, "lot_size": pos.lot_size,
+             "side": pos.direction,
+             "signal_reason": pos.signal_reason,
+@@ -2724,15 +2880,18 @@
+             "exit_reason": pos.close_reason or "",
+             "exit_price": exit_price_str,
+             # v2.3.7-stage1 (V4 Problem №1): exit_time — АВТОРИТЕТНОЕ время
+-            # закрытия для хронологического пересчёта cumulative: фиксируется
+-            # время ЗАПРОСА закрытия (close_requested_at: триггер SL/TP /
+-            # отправка SELL) — оно не зависит от момента записи строки и
+-            # от порядка обхода позиций в цикле. Фиксируется ОДИН раз и
+-            # recovery-обновлениями не меняется. Для закрытий без своей
+-            # заявки (B3) и позиций без close_requested_at — момент записи
+-            # строки (единственная доступная оценка; НЕ скрытая подстановка
+-            # при пересчёте).
+-            "exit_time": pos.close_requested_at
++            # закрытия для хронологического пересчёта cumulative. v2.3.8-stage1
++            # (V5 Defect A): это время ЗАПРОСА закрытия (_close_request_ts:
++            # close_requested_at, при его отсутствии — requested_at своего
++            # cursor'а) — оно не зависит от момента записи строки и от
++            # порядка обхода позиций в цикле; фиксируется при отправке SELL,
++            # переживает потерю ответа брокера и перезапуск, recovery-
++            # обновлениями не меняется. Для закрытий без своей заявки (B3)
++            # и позиций без сохранённого timestamp — момент записи строки
++            # (единственная доступная оценка; НЕ скрытая подстановка при
++            # пересчёте). НЕ время фактического исполнения сделки (его
++            # используемый API не подтверждает — см. _close_request_ts).
++            "exit_time": _close_request_ts(pos)
+             or datetime.now(timezone.utc).isoformat(),
+             "commission_rub": commission_str,
+             "commission_source": commission_source,
+@@ -2854,27 +3013,59 @@
+     #   * задача удаляется ТОЛЬКО при завершённом восстановлении (в строке
+     #     подтверждены и цена, и фактическая комиссия) — ТЗ №10; новая
+     #     позиция по тому же FIGI удаление задачи не инициирует.
++    # v2.3.8-stage1 (B2 V5, Defect B): ПЕРЕД любой обработкой задача
++    # проверяется на согласованность идентичности (validate_recovery_identity:
++    # rec.trade_id == снимок.trade_id, FIGI, своя close-заявка, привязка
++    # cursor'а, дубликаты trade_id). Противоречивая задача: НЕ опрашивается,
++    # НЕ изменяет CSV, НЕ затрагивает другие позиции, НЕ удаляется как
++    # «успешно завершённая» — остаётся с маркером "conflict" и причиной
++    # (событие CSV_RECOVERY_TASK_CONFLICT; маркер персистентен в state.json).
+     for rec in list(getattr(monitor, "pending_csv_recoveries", []) or []):
+         trade_id = str(rec.get("trade_id") or "")
+         ticker = str(rec.get("ticker") or "?")
++        # --- v2.3.8-stage1 (B2 V5, Defect B): валидация идентичности ---
++        # Учитывается КАК свежая проверка снимка, ТАК и ранее установленный
++        # маркер (например, duplicate_trade_id_conflicting из import_state):
++        # заблокированная задача не «разблокируется» повторной проверкой.
++        try:
++            detected = ExecutionMonitor.validate_recovery_identity(rec)
++        except Exception as exc:
++            detected = f"validator_error:{type(exc).__name__}"
++        conflict = rec.get("conflict") or detected
++        if conflict is not None:
++            if rec.get("conflict") != conflict:
++                # Событие — только при первичном обнаружении/смене причины
++                # (без спама в журнале событий на каждом цикле).
++                rec["conflict"] = conflict
++                research_logger.log_event("CSV_RECOVERY_TASK_CONFLICT", {
++                    "trade_id": trade_id, "figi": rec.get("figi"),
++                    "reason": conflict, "stage": "process_closing",
++                })
++            logging.error(
++                f"[csv-recovery] {ticker}: задача trade_id={trade_id or '?'} "
++                f"— конфликт идентичности ({conflict}): брокер не опрашивается, "
++                f"CSV не изменяется, задача не завершается (fail-closed)")
++            continue
+         if not trade_id:
+             continue
+         try:
+             task_pos = TrackedPosition.from_dict(rec.get("position") or {})
+         except Exception as exc:
+-            # Снимок невосстановим (повреждён в памяти): задача непригодна,
+-            # сохранение порождало бы вечные сбои; ни одна строка CSV и ни
+-            # один учётный объект не затронуты (fail-closed).
++            # Снимок невосстановим (повреждён в памяти): задача НЕ удаляется
++            # и НЕ считается завершённой (v2.3.8-stage1, Defect B) — ни одна
++            # строка CSV и ни один учётный объект не затронуты (fail-closed).
++            if rec.get("conflict") != "snapshot_unrestorable":
++                rec["conflict"] = "snapshot_unrestorable"
++                research_logger.log_event("CSV_RECOVERY_TASK_CONFLICT", {
++                    "trade_id": trade_id, "figi": rec.get("figi"),
++                    "reason": "snapshot_unrestorable",
++                    "detail": f"{type(exc).__name__}: {exc}",
++                    "stage": "process_closing",
++                })
+             logging.error(
+                 f"[csv-recovery] {ticker}: снимок задачи trade_id={trade_id} "
+                 f"невосстановим ({type(exc).__name__}: {exc}) — задача "
+-                f"удалена, CSV не изменён (fail-closed)")
+-            research_logger.log_event("CSV_RECOVERY_TASK_DROPPED", {
+-                "trade_id": trade_id, "figi": rec.get("figi"),
+-                "reason": "snapshot_unrestorable",
+-            })
+-            if rec in monitor.pending_csv_recoveries:
+-                monitor.pending_csv_recoveries.remove(rec)
++                f"остаётся с маркером конфликта, CSV не изменён (fail-closed)")
+             continue
+         try:
+             await _recover_late_csv_metadata(client, task_pos)
+--- /home/z/my-project/download/samsung_merge_candidate_v4/execution.py	2026-11-24 12:53:37.000000000 +0000
++++ env_final_v5/execution.py	2026-11-24 14:39:02.284032756 +0000
+@@ -2,6 +2,23 @@
+ # Tsclp_v2.2_volatile — мониторинг позиций.
+ # Полная замена: совместимость с API Samsung + per-order учёт SELL.
+ #
++# ИЗМЕНЕНИЯ (v2.3.8-stage1 — B2 V5, Defect B: fail-closed валидация
++# идентичности recovery-задач; база v2.3.7-stage1):
++#   import_state() восстанавливал снимок задачи pending_csv_recoveries
++#   через TrackedPosition.from_dict(), но НЕ проверял согласованность
++#   внешней записи и снимка — при несовпадении rec.trade_id /
++#   task_pos.trade_id задача могла обновить одну строку CSV, а завершиться
++#   по состоянию другой. Введена validate_recovery_identity() (rec<->снимок:
++#   trade_id, FIGI, своя close-заявка, привязка per-order cursor'а
++#   trade_id/figi/side) — применяется при импорте каждой задачи и перед
++#   каждым recovery-циклом. Противоречивая задача НЕ опрашивается, НЕ
++#   меняет CSV, НЕ удаляется как завершённая — остаётся с персистентным
++#   маркером "conflict". Дубликаты trade_id: идентичные записи дедуплици
++#   руются детерминированно (первая), конфликтующие (разные снимки или
++#   разные close-ID) — ОБЕ блокируются без произвольного выбора.
++#   Существующие mechanisms (archive_pending_csv_recovery, дедуп по
++#   trade_id, fail-closed recovery) не ослаблены.
++#
+ # ИЗМЕНЕНИЯ (v2.3.3-stage1 — дефект «повторное открытие позиции при
+ # активной частичной SELL»):
+ #   Сценарий дефекта: SELL 10 лот. -> PARTIALLYFILL (исполнено 3) ->
+@@ -143,6 +160,7 @@
+ #   только в сторону ужесточения и не хуже уровня безубытка. check_all()
+ #   принимает extremes/atrs (необязательные — старый вызов с одной ценой
+ #   работает как прежде) и классифицирует причину SL-выхода: SL / BE / TRAIL.
++import json
+ import logging
+ from dataclasses import dataclass, field, asdict
+ from enum import Enum
+@@ -1195,6 +1213,188 @@
+             ],
+         }
+ 
++    # =================================================================
++    # v2.3.8-stage1 (B2 V5, Defect B): fail-closed ВАЛИДАЦИЯ ИДЕНТИЧНОСТИ
++    # recovery-задач (pending_csv_recoveries).
++    #
++    # Обнаруженный дефект: import_state() восстанавливал снимок задачи через
++    # TrackedPosition.from_dict(), но НЕ проверял согласованность внешней
++    # записи (rec["trade_id"]/rec["figi"]) и самого снимка. В
++    # process_closing() внешний rec["trade_id"] используется для проверки
++    # завершения задачи, а _recover_late_csv_metadata() — task_pos.trade_id
++    # из снимка. При несовпадении идентификаторов задача могла обновить одну
++    # строку CSV (по снимку), а завершиться по состоянию другой (по rec).
++    #
++    # Протокол противоречия (fail-closed): задача НЕ опрашивается у брокера,
++    # НЕ изменяет CSV, НЕ затрагивает другие позиции, НЕ удаляется как
++    # «успешно завершённая» — она ОСТАЁТСЯ в очереди с маркером "conflict"
++    # (причина конфликта персистентна в state.json для аудита) и
++    # диагностическим событием.
++    #
++    # Дубликаты trade_id при импорте:
++    #   * ПОЛНЫЕ дубликаты (та же версия, trade_id, figi, ticker, reason и
++    #     побайтово тот же снимок) — дедуп до одной записи (детерминированно,
++    #     первая; информация не теряется — записи идентичны);
++    #   * КОНФЛИКТУЮЩИЕ дубликаты (разные снимки или разные close-ID при
++    #     одном trade_id) — ни одна НЕ выбирается произвольно: ОБЕ остаются
++    #     с маркером "conflict": duplicate_trade_id_conflicting, никаких
++    #     опросов и обновлений CSV.
++    # =================================================================
++
++    @staticmethod
++    def _recovery_canonical_body(rec) -> str:
++        """Каноническая форма записи задачи для сравнения дубликатов
++        (без летучего маркера "conflict"); детерминированный JSON."""
++        return json.dumps(
++            {k: v for k, v in rec.items() if k != "conflict"},
++            ensure_ascii=False, sort_keys=True, default=str)
++
++    @staticmethod
++    def validate_recovery_identity(rec) -> Optional[str]:
++        """v2.3.8-stage1 (B2 V5, Defect B): проверка согласованности внешней
++        записи recovery-задачи и её снимка позиции.
++
++        Возвращает None (задача идентично согласована) или ПРИЧИНУ конфликта
++        (строка). Проверяются:
++          * rec.trade_id == snapshot.trade_id;
++          * rec.figi == snapshot.figi;
++          * наличие стабильного trade_id и FIGI;
++          * наличие СВОЕЙ close-заявки (close_order_request_id /
++            close_order_id — клиентский UUID или биржевой ID);
++          * при наличии per-order cursor'а для этой заявки — совпадение
++            cursor'а со сделкой (trade_id, FIGI, сторона заявки).
++        Отсутствующий cursor (легаси-снимок) НЕ конфликт: опрос невозможен,
++        но и подмены идентичности нет — штатный no_cursor-путь recovery.
++        Клиентский UUID, биржевой ID и trade_id — РАЗНЫЕ идентификаторы;
++        смешение проверяется через привязку cursor'а (trade_id/figi/side
++        записываются в cursor при add_close_order по данным СВОЕЙ сделки)."""
++        if not isinstance(rec, dict):
++            return "not_dict"
++        snap = rec.get("position")
++        if not isinstance(snap, dict):
++            return "no_snapshot"
++        try:
++            pos = TrackedPosition.from_dict(snap)
++        except Exception:
++            return "snapshot_unrestorable"
++        rec_tid = str(rec.get("trade_id") or "").strip()
++        snap_tid = str(getattr(pos, "trade_id", "") or "").strip()
++        if not snap_tid:
++            return "no_trade_id"
++        if rec_tid != snap_tid:
++            return "trade_id_mismatch"
++        snap_figi = str(getattr(pos, "figi", "") or "").strip()
++        if not snap_figi:
++            return "no_figi"
++        rec_figi = str(rec.get("figi") or "").strip()
++        if rec_figi and rec_figi != snap_figi:
++            return "figi_mismatch"
++        req_id = getattr(pos, "close_order_request_id", None)
++        exch_id = pos.close_order_id
++        oid = str(req_id or exch_id or "").strip()
++        if not oid:
++            return "no_close_order_ref"
++        cursor = (getattr(pos, "close_orders", {}) or {}).get(oid)
++        if cursor is not None:
++            close_side = "SELL" if pos.direction == "BUY" else "BUY"
++            cur_tid = str(cursor.get("trade_id") or "").strip()
++            cur_figi = str(cursor.get("figi") or "").strip()
++            cur_side = str(cursor.get("side") or "").strip()
++            if cur_tid and cur_tid != snap_tid:
++                return "cursor_trade_id_mismatch"
++            if cur_figi and cur_figi != snap_figi:
++                return "cursor_figi_mismatch"
++            if cur_side and cur_side != close_side:
++                return "cursor_side_mismatch"
++        return None
++
++    def _import_pending_recoveries(self, raw_pending) -> List[dict]:
++        """v2.3.8-stage1 (B2 V5, Defect B): импорт незавершённых recovery-задач
++        с валидацией идентичности и обработкой дубликатов.
++
++        Структурно нечитаемые записи (не dict) сохранять нечего — они
++        отбрасываются с журналом (fail-closed по записи, без падения
++        процесса). Все ОСТАЛЬНЫЕ записи сохраняются; запись с нарушенной
++        идентичностью получает маркер "conflict" с причиной (персистентен
++        в state.json, экспортируется/импортируется обратно) — задача остаётся в очереди,
++        но recovery-циклом НЕ обрабатывается (fail-closed протокол выше).
++        Ревалидация при каждом импорте идемпотентна: исправленная запись
++        снова становится пригодной (маркер перезаписывается актуальным
++        результатом проверки)."""
++        if not isinstance(raw_pending, list):
++            logging.error(
++                "[execution] import_state: pending_csv_recoveries не list — "
++                "восстановление задач пропущено (обратная совместимость)")
++            return []
++        staged: List[dict] = []
++        for rec in raw_pending:
++            if not isinstance(rec, dict):
++                logging.error(
++                    "[execution] import_state: запись "
++                    "pending_csv_recoveries не dict — отброшена "
++                    "(сохранять нечего)")
++                continue
++            staged.append(dict(rec))
++        # --- дубликаты trade_id ---
++        grouped: Dict[str, List[dict]] = {}
++        for rec in staged:
++            tid = str(rec.get("trade_id")
++                      or (rec.get("position") or {}).get("trade_id")
++                      or "")
++            if tid:
++                grouped.setdefault(tid, []).append(rec)
++        identical_dup_ids = set()
++        conflicting_dup_ids = set()
++        for tid, recs in grouped.items():
++            if len(recs) < 2:
++                continue
++            bodies = {self._recovery_canonical_body(r) for r in recs}
++            if len(bodies) == 1:
++                identical_dup_ids.add(tid)  # полные дубликаты — дедуп
++            else:
++                conflicting_dup_ids.add(tid)  # разные снимки/close-ID
++        pending: List[dict] = []
++        seen_identical: set = set()
++        for rec in staged:
++            tid = str(rec.get("trade_id")
++                      or (rec.get("position") or {}).get("trade_id")
++                      or "")
++            if tid in identical_dup_ids:
++                if tid in seen_identical:
++                    logging.warning(
++                        "[execution] import_state: полная копия recovery-задачи "
++                        f"trade_id={tid} пропущена (дедуп, записи идентичны)")
++                    continue
++                seen_identical.add(tid)
++            conflict = self.validate_recovery_identity(rec)
++            if conflict is None and tid in conflicting_dup_ids:
++                conflict = "duplicate_trade_id_conflicting"
++            snap = rec.get("position")
++            display_tid = str(
++                rec.get("trade_id")
++                or (snap.get("trade_id") if isinstance(snap, dict) else "")
++                or "?")
++            if conflict is not None:
++                logging.error(
++                    "[execution] import_state: recovery-задача "
++                    f"trade_id={display_tid} — конфликт идентичности "
++                    f"({conflict}) — оставлена с маркером, брокер не "
++                    "опрашивается, CSV не изменяется (fail-closed)")
++            pending.append({
++                "version": rec.get("version", 1),
++                "trade_id": str(rec.get("trade_id")
++                                or (snap.get("trade_id") if isinstance(snap, dict) else "")
++                                or ""),
++                "figi": rec.get("figi") or (snap.get("figi") if isinstance(snap, dict) else "") or "",
++                "ticker": rec.get("ticker") or (snap.get("ticker") if isinstance(snap, dict) else "") or "",
++                "reason": rec.get("reason", ""),
++                "position": snap if isinstance(snap, dict) else snap,
++                # v2.3.8-stage1: маркер конфликта персистентен (аудит);
++                # None для согласованных задач — ключ не добавляется.
++                **({"conflict": conflict} if conflict is not None else {}),
++            })
++        return pending
++
+     def import_state(self, data):
+         if not isinstance(data, dict):
+             logging.error("[execution] import_state: data is not dict")
+@@ -1227,53 +1427,13 @@
+         self.monitoring_error = bool(data.get("monitoring_error", False))
+         # v2.3.7-stage1 (B2 V4): восстановление незавершённых recovery-задач.
+         # Обратная совместимость: старый state.json без ключа -> пустой
+-        # список. Повреждённая/неполная запись отбрасывается ЦЕЛИКОМ с
+-        # журналом (fail-closed по записи, без падения процесса): задача
+-        # непригодна, если её снимок позиции не восстанавливается
+-        # TrackedPosition.from_dict — восстановление по ней невозможно,
+-        # а сохранение мусора порождало бы вечные ошибки в recovery-цикле.
+-        raw_pending = data.get("pending_csv_recoveries", [])
+-        pending: List[dict] = []
+-        if isinstance(raw_pending, list):
+-            for rec in raw_pending:
+-                if not isinstance(rec, dict):
+-                    logging.error(
+-                        "[execution] import_state: запись "
+-                        "pending_csv_recoveries не dict — отброшена")
+-                    continue
+-                snap = rec.get("position")
+-                if not isinstance(snap, dict):
+-                    logging.error(
+-                        "[execution] import_state: запись "
+-                        "pending_csv_recoveries без снимка позиции — "
+-                        "отброшена")
+-                    continue
+-                trade_id = str(rec.get("trade_id") or snap.get("trade_id") or "")
+-                try:
+-                    TrackedPosition.from_dict(snap)  # валидация восстановимости
+-                except Exception as exc:
+-                    logging.error(
+-                        "[execution] import_state: recovery-задача "
+-                        f"trade_id={trade_id or '?'} невосстановима "
+-                        f"({type(exc).__name__}: {exc}) — отброшена")
+-                    continue
+-                if not trade_id:
+-                    logging.error(
+-                        "[execution] import_state: recovery-задача без "
+-                        "trade_id — отброшена (fail-closed)")
+-                    continue
+-                pending.append({
+-                    "version": rec.get("version", 1),
+-                    "trade_id": trade_id,
+-                    "figi": rec.get("figi") or snap.get("figi") or "",
+-                    "ticker": rec.get("ticker") or snap.get("ticker") or "",
+-                    "reason": rec.get("reason", ""),
+-                    "position": snap,
+-                })
+-        else:
+-            logging.error(
+-                "[execution] import_state: pending_csv_recoveries не list — "
+-                "восстановление задач пропущено (обратная совместимость)")
++        # список. v2.3.8-stage1 (B2 V5, Defect B): валидация идентичности
++        # каждой задачи (внешняя запись <-> снимок <-> per-order cursor),
++        # обработка дубликатов trade_id; противоречивая задача ОСТАЁТСЯ
++        # с маркером "conflict" и не может обновить CSV (fail-closed,
++        # см. шапку v2.3.8-stage1).
++        pending = self._import_pending_recoveries(
++            data.get("pending_csv_recoveries", []))
+         self.pending_csv_recoveries = pending
+         if pending:
+             logging.warning(

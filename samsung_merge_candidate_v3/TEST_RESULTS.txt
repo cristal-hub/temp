@@ -1,0 +1,116 @@
+TEST_RESULTS.txt — samsung_merge_candidate_v3 (v2.3.6-stage1)
+B2 FINAL ACCOUNTING CONSISTENCY AUDIT + LATE METADATA CSV RECOVERY
+Дата: 2026-11-24. Режим: RESEARCH ONLY / NO LIVE ORDERS / SANDBOX.
+
+====================================================================
+1. ОКРУЖЕНИЯ ПРОВЕРКИ
+====================================================================
+Канонические прогоны выполняются в ПОЛНОМ Samsung-дереве @ 051b10f
+(нужны config.py, logger.py, execution.py, order_ledger.py,
+tinkoff_client.py). Чистое дерево пакета (main.py + тесты) не собирается
+(ModuleNotFoundError: config) — ожидаемое свойство пакета, как и у
+предыдущих кандидатов v1/v2.
+
+- baseline-дерево: Samsung @ 051b10f + v2 main.py + v2 execution.py +
+  v2 тесты (исходная точка ТЗ = пакет samsung_merge_candidate_v2).
+- final-дерево: Samsung @ 051b10f + v3 main.py + v2 execution.py +
+  v3 logger.py + 3 тестовых файла.
+- negative-дерево: Samsung @ 051b10f + v2 main.py + v2 execution.py +
+  v2 logger (СТАРЫЙ код) + НОВЫЙ тест test_b2_csv_recovery.py.
+
+Команда: python3 -m pytest -p no:cacheprovider --continue-on-collection-errors
+(корневой test_execution.py дерева не собирается — pre-existing артефакт,
+копия ищет execution.py на уровень выше; идентичен во всех прогонах).
+
+====================================================================
+2. ПОЛНЫЙ BASELINE PYTEST (до изменений)
+====================================================================
+Результат: 74 failed, 594 passed, 1 error in 10.20s
+Полный лог: appendix_BASELINE_FULL_PYTEST.txt
+Совпадает с финальным прогоном v2-кандидата (74/594/1) — база воспроизведена.
+
+====================================================================
+3. ПОЛНЫЙ FINAL PYTEST (после изменений)
+====================================================================
+Результат: 74 failed, 608 passed, 1 error in 10.60s
+Полный лог: appendix_FINAL_FULL_PYTEST.txt
+FAILED-набор побайтно ИДЕНТИЧЕН baseline (74 строки FAILED, diff пуст).
+Прибавка passed: +14 = ровно новые тесты test_b2_csv_recovery.py.
+Новых ошибок нет; сбор-ошибка корневого test_execution.py идентична.
+
+====================================================================
+4. B2-НАБОР (все поколения кандидатов)
+====================================================================
+Команда: python3 -m pytest -p no:cacheprovider test_b2_close_accounting.py
+         test_b2_terminal_metadata_recovery.py test_b2_csv_recovery.py -v
+Результат в final-дереве: 42 passed (0 failed)
+ - test_b2_close_accounting.py          20/20 PASS (v1, файл байт-идентичен v1)
+ - test_b2_terminal_metadata_recovery.py 8/8 PASS (v2, файл байт-идентичен v2)
+ - test_b2_csv_recovery.py              14/14 PASS (НОВЫЙ, тесты A–N)
+Лог: appendix_B2_TESTS_OUTPUT.txt
+
+====================================================================
+5. НОВЫЕ ТЕСТЫ A–N (test_b2_csv_recovery.py)
+====================================================================
+A  test_a_actual_commission_recovered_after_csv_write        PASSED
+B  test_b_execution_price_recovered_after_price_unknown_csv  PASSED
+C  test_c_commission_first_then_price                        PASSED
+D  test_d_price_first_then_commission                        PASSED
+E  test_e_repeated_identical_report_does_not_change_result_twice  PASSED
+F  test_f_late_data_after_restart_updates_previous_trade     PASSED
+G  test_g_cumulative_pnl_recomputed_for_subsequent_trades    PASSED
+H  test_h_repeat_processing_creates_no_csv_duplicate         PASSED
+I  test_i_conflicting_price_does_not_overwrite_confirmed_price    PASSED
+J  test_j_conflicting_commission_does_not_overwrite_confirmed_commission PASSED
+K  test_k_partial_execution_does_not_reapply_lots            PASSED
+L  test_l_failed_csv_update_does_not_corrupt_file            PASSED
+M  test_m_missing_or_ambiguous_trade_id_does_not_update_foreign_trade PASSED
+N  test_n_full_process_repeat_gives_same_result_as_single    PASSED
+Лог: appendix_NEW_TESTS_OUTPUT.txt
+
+Соответствие разделу 6 ТЗ:
+A — фактическая комиссия после записи CSV; B — цена после PRICE_UNKNOWN;
+C/D — цена и комиссия в разном порядке; E — идемпотентность повтора
+(байт-в-байт); F — поздние данные после перезапуска (export/import state);
+G — пересчёт накопительного P&L последующих сделок; H — без CSV-дублей;
+I/J — противоречивая цена/комиссия не перезаписывают подтверждённые;
+K — частичное исполнение без повторного применения лотов (+ отказ отчёта
+с выросшим cumulative); L — сбой обновления не повреждает файл
+(байт-в-байт + без временных остатков + восстановление на следующем цикле);
+M — отсутствующий/неоднозначный trade_id (чужие строки не изменены);
+N — двойное выполнение процесса = однократному.
+
+====================================================================
+6. НЕГАТИВНАЯ ВАЛИДАЦИЯ (старый код v2 + старый logger)
+====================================================================
+Результат: 12 failed, 2 passed
+- Падают A, B, C, D, E, F, G, I, J, L, M, N — дефект-детектирующие тесты
+  действительно проверяют описанные в ТЗ проблемы.
+- Проходят H (дубли не создаются) и K (лоты не применяются повторно) —
+  регрессионные инварианты, на старом коде выполняются тривиально
+  (механизм ничего не делает).
+Лог: appendix_NEGATIVE_VALIDATION_OLD_CODE.txt
+
+====================================================================
+7. СОХРАННОСТЬ (проверки diff/SHA)
+====================================================================
+- execution.py: SHA256 = 1f1a93b4... (= v2 байт-в-байт, НЕ изменялся).
+- test_b2_close_accounting.py: 9fa798bd... (= v1), 20/20 PASS.
+- test_b2_terminal_metadata_recovery.py: 2f4ab482... (= v2), 8/8 PASS.
+- B3 (_finalize_position_closed и др.): байт-идентичен v1/v2
+  (awk-вырезка функции, SHA e13bc218... во всех трёх кандидатах).
+- main.py v2→v3: 4 блока ДОБАВЛЕНИЙ (447 строк diff), существующая логика
+  не удалена/не переписана (единственная изменённая строка — вынос
+  литерала маркера PRICE_UNKNOWN в константу с сохранением строки
+  байт-в-байт).
+- logger.py Samsung→v3: 0 удалённых строк, +300 добавленных.
+- FAILED-набор full pytest: идентичен baseline побайтно.
+- Полный diff: FULL_DIFF.patch (Samsung @ 051b10f → v3, 6 файлов).
+
+====================================================================
+8. ОГРАНИЧЕНИЯ И ИЗВЕСТНЫЕ ПРОБЛЕМЫ
+====================================================================
+См. MERGE_REPORT.md §7 (мультиордерные закрытия, позиции без trade_id,
+B3-внешние закрытия, округление при пересчёте cumulative, частота опроса
+CLOSED-позиций, полные строки не опрашиваются). Ничего не маскировано:
+все ограничения задокументированы и покрыты тестами на границах.
