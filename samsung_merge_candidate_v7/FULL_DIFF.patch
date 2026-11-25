@@ -1,0 +1,369 @@
+--- a/main.py
++++ b/main.py
+@@ -1331,22 +1331,72 @@
+     return s if (s and _parse_iso_ts(s) is not None) else None
+ 
+ 
++def _alt_cursor_identity_conflict(pos, alt_oid, cursor) -> Optional[str]:
++    """v2.3.10-stage1 (B2 V7, Defect B): проверка ИДЕНТИЧНОСТИ
++    альтернативного cursor'а close-заявки ПЕРЕД использованием его
++    requested_at в _restore_close_requested_at().
++
++    Совпадение КЛЮЧА поиска (close_order_request_id / close_order_id) —
++    НЕ доказательство идентичности: под собственным ключом может лежать
++    cursor ДРУГОЙ сделки или другой заявки (контаминация state.json,
++    замена позиции того же FIGI, ручные правки). Перед использованием
++    timestamp проверяются доступные идентификаторы cursor'а:
++      * маркер identity_version: неизвестная/некорректная/пустая версия
++        (присутствует, но не равна поддерживаемой CURSOR_IDENTITY_VERSION)
++        — отказ "cursor_invalid_identity_version"; ключа нет — LEGACY:
++        отдельная политика ДОСТУПНЫХ идентификаторов;
++      * противоречие снимку позиции (trade_id / FIGI / side) или
++        собственной close-заявке (order_id != ключу) — отказ
++        cursor_*_mismatch (для НОВОГО формата, кроме того, обязательность
++        trade_id/FIGI/side/order_id);
++      * положительная привязка к ЭТОЙ сделке и ЭТОЙ заявке: cursor обязан
++        СОДЕРЖАТЬ непустые trade_id (== снимку) и order_id (== ключу
++        поиска) — иначе идентичность НЕ подтверждена
++        ("cursor_unconfirmed_identity") и timestamp НЕ используется.
++    Возвращает None ТОЛЬКО при подтверждённой идентичности; любое иное
++    значение — запрет на использование requested_at этого cursor'а
++    (fail-closed, без подмены времени временем восстановления)."""
++    state = ExecutionMonitor._cursor_identity_state(cursor)
++    if state == "invalid":
++        return "cursor_invalid_identity_version"
++    snap_tid = str(getattr(pos, "trade_id", "") or "").strip()
++    snap_figi = str(getattr(pos, "figi", "") or "").strip()
++    conflict = ExecutionMonitor._cursor_identity_conflict(
++        pos, alt_oid, cursor, snap_tid, snap_figi, (state == "new"))
++    if conflict is not None:
++        return conflict
++    cur_tid = str(cursor.get("trade_id") or "").strip()
++    cur_oid = str(cursor.get("order_id") or "").strip()
++    if (not cur_tid or cur_tid != snap_tid
++            or not cur_oid or cur_oid != str(alt_oid)):
++        return "cursor_unconfirmed_identity"
++    return None
++
++
+ def _restore_close_requested_at(pos, oid) -> Optional[str]:
+-    """v2.3.9-stage1 (B2 V6, Defect A): восстановление ПЕРВОНАЧАЛЬНОГО
+-    времени ЗАПРОСА SELL при разрешении «позиция отсутствует у брокера» (В2).
++    """v2.3.9-stage1 (B2 V6, Defect A); v2.3.10-stage1 (B2 V7, Defect B):
++    восстановление ПЕРВОНАЧАЛЬНОГО времени ЗАПРОСА SELL при разрешении
++    «позиция отсутствует у брокера» (В2).
+ 
+     ПЕРВОНАЧАЛЬНОЕ время запроса SELL — НЕИЗМЕНЯЕМЫЙ факт. Приоритет
+-    (ТЗ V6 п.2.2):
++    (ТЗ V6 п.2.2; ТЗ V7 п.2):
+       1) существующий ВАЛИДНЫЙ pos.close_requested_at — перезаписи не
+          подлежит НИКОГДА: ни updated_at_utc/timestamp_utc реестра (это
+          метаданные ledger о времени СИНХРОНИЗАЦИИ записи, не о запросе
+          SELL), ни время восстановления статуса, ни время текущего запуска;
+-      2) requested_at СВОЕГО per-order close cursor'а
++      2) requested_at СВОЕГО валидного per-order close cursor'а
+          (close_orders[oid]["requested_at"] — время, сохранённое
+          close_position()/add_close_order() ДО отправки SELL);
+-      3) requested_at СВОЕЙ записи close_orders, доступной через ДРУГОЙ
+-         сохранённый идентификатор ЭТОЙ ЖЕ заявки (close_order_request_id /
+-         close_order_id);
++      3) requested_at ПОДТВЕРЖДЁННОГО альтернативного cursor'а ТОЙ ЖЕ
++         заявки (v2.3.10-stage1): запись close_orders, доступная через
++         ДРУГОЙ сохранённый идентификатор ЭТОЙ ЖЕ заявки
++         (close_order_request_id / close_order_id), используется ТОЛЬКО
++         после подтверждения идентичности (_alt_cursor_identity_conflict:
++         trade_id, FIGI, side, order_id, связь с собственной close-заявкой,
++         корректная версия cursor'а); совпадение ключа — НЕ доказательство
++         идентичности: чужой trade_id/FIGI, неправильный side/order_id,
++         неизвестная/некорректная версия или непредтверждённая
++         идентичность — timestamp НЕ используется;
+       4) достоверного исторического времени нет -> None. datetime.now()
+          внутрь восстановления НЕ подставляется: управление передаётся
+          СУЩЕСТВУЮЩЕЙ явно обозначенной legacy-политике записи CSV
+@@ -1355,9 +1405,10 @@
+     Запрещено и НЕ реализовано: подмена известного timestamp на
+     updated_at_utc/timestamp_utc реестра, на время текущего запуска, на
+     время восстановления статуса, а также взятие timestamp другой заявки
+-    или другой сделки (ищутся ТОЛЬКО записи СВОЕЙ close-заявки по
+-    сохранённым идентификаторам ЭТОЙ позиции; случайные курсоры чужих
+-    заявок не используются)."""
++    или другой сделки — даже при совпадающем FIGI (случайные курсоры
++    чужих заявок не используются; при конфликте альтернативного cursor'а
++    чужое время не подставляется и datetime.now() не используется —
++    срабатывает приоритет 4: None и legacy-политика записи CSV)."""
+     # 1) существующее валидное значение — неизменяемый факт
+     existing = _valid_saved_ts(getattr(pos, "close_requested_at", None))
+     if existing:
+@@ -1372,17 +1423,29 @@
+         if ts:
+             return ts
+     # 3) собственная запись close_orders через другой идентификатор ТОЙ ЖЕ
+-    #    заявки (клиентский UUID / биржевой ID)
++    #    заявки (клиентский UUID / биржевой ID). v2.3.10-stage1 (B2 V7,
++    #    Defect B): совпадение ключа — НЕ доказательство идентичности;
++    #    перед использованием requested_at идентичность cursor'а
++    #    ПОДТВЕРЖДАЕТСЯ (trade_id, FIGI, side, order_id, связь с
++    #    собственной close-заявкой, корректная версия маркера). Чужой
++    #    trade_id/FIGI, неправильный side/order_id, неизвестная/
++    #    некорректная версия или непредтверждённая идентичность —
++    #    timestamp НЕ используется (никакого чужого времени, никакой
++    #    подмены datetime.now(): срабатывает приоритет 4 — None и
++    #    существующая legacy-политика записи CSV).
+     for alt in (getattr(pos, "close_order_request_id", None),
+                 getattr(pos, "close_order_id", None)):
+         alt_id = str(alt or "").strip()
+         if not alt_id or alt_id == str(oid):
+             continue
+         rec_cursor = orders.get(alt_id)
+-        if isinstance(rec_cursor, dict):
+-            ts = _valid_saved_ts(rec_cursor.get("requested_at"))
+-            if ts:
+-                return ts
++        if not isinstance(rec_cursor, dict):
++            continue
++        if _alt_cursor_identity_conflict(pos, alt_id, rec_cursor) is not None:
++            continue
++        ts = _valid_saved_ts(rec_cursor.get("requested_at"))
++        if ts:
++            return ts
+     # 4) исторического времени нет — оставить отсутствующим (None);
+     #    legacy-политика применяется ТОЛЬКО на записи CSV
+     return None
+@@ -1805,10 +1868,13 @@
+         # chronological cumulative P&L ломался. Теперь:
+         #   1) существующий валидный close_requested_at не перезаписывается
+         #      никогда; 2) при отсутствии — requested_at СВОЕГО per-order
+-        #      cursor'а; 3) затем — requested_at собственной записи
++        #      cursor'а; 3) затем — requested_at ПОДТВЕРЖДЁННОЙ записи
+         #      close_orders через другой сохранённый идентификатор этой же
+-        #      заявки; 4) если исторического времени нет — остаётся None и
+-        #      управление передаётся существующей явно обозначенной
++        #      заявки (v2.3.10-stage1 / B2 V7: идентичность альтернативного
++        #      cursor'а проверяется ПЕРЕД использованием времени —
++        #      _alt_cursor_identity_conflict; чужой timestamp не
++        #      используется); 4) если исторического времени нет — остаётся
++        #      None и управление передаётся существующей явно обозначенной
+         #      legacy-политике записи CSV (см. _close_request_ts).
+         # updated_at_utc/timestamp_utc реестра остаются метаданными ledger
+         # и в close_requested_at не попадают; datetime.now() в функции
+--- a/execution.py
++++ b/execution.py
+@@ -432,10 +432,22 @@
+                   if oid_ref else None)
+         if not isinstance(cursor, dict):
+             cursor_validation = "none"
+-        elif self._cursor_is_new_format(cursor):
+-            cursor_validation = "full"
+         else:
+-            cursor_validation = "legacy_limited"
++            # v2.3.10-stage1 (B2 V7, Defect A): ТРИ состояния маркера
++            # версии. LEGACY (ключа нет) -> legacy_limited; поддерживаемая
++            # версия -> full; НЕКОРРЕКТНАЯ/неизвестная версия -> отдельный
++            # режим "invalid_version" (НЕ legacy): fail-closed, причина
++            # конфликта (cursor_invalid_identity_version) ставится
++            # validate_recovery_identity() при первой проверке задачи —
++            # брокер не опрашивается, CSV не изменяется, задача не
++            # удаляется и не «повышается» автоматически.
++            cursor_state = self._cursor_identity_state(cursor)
++            if cursor_state == "new":
++                cursor_validation = "full"
++            elif cursor_state == "legacy":
++                cursor_validation = "legacy_limited"
++            else:
++                cursor_validation = "invalid_version"
+         self.pending_csv_recoveries.append({
+             "version": 1,
+             "trade_id": trade_id,
+@@ -1318,20 +1330,52 @@
+             ensure_ascii=False, sort_keys=True, default=str)
+ 
+     @staticmethod
+-    def _cursor_is_new_format(cursor) -> bool:
+-        """v2.3.9-stage1 (B2 V6, Defect B): True — cursor создан ТЕКУЩЕЙ
+-        версией add_close_order() (явный маркер identity_version ==
+-        CURSOR_IDENTITY_VERSION). Число и его строковое представление
+-        эквивалентны (JSON-окружение: state.json). Записи без маркера —
+-        legacy (см. _cursor_identity_conflict)."""
+-        ver = (cursor or {}).get("identity_version")
+-        if ver is None:
+-            return False
++    def _cursor_identity_state(cursor) -> str:
++        """v2.3.10-stage1 (B2 V7, Defect A): СТРОГАЯ трихотомия cursor'а по
++        маркеру identity_version — состояния НЕ смешиваются:
++          "legacy"  — ключа "identity_version" НЕТ (старые state.json):
++                      применяется отдельная legacy-политика — проверка всех
++                      ДОСТУПНЫХ идентификаторов, неполнота НЕ выдаётся за
++                      полную (cursor_validation="legacy_limited");
++          "new"     — маркер присутствует и РАВЕН поддерживаемой версии
++                      CURSOR_IDENTITY_VERSION (число и строковое
++                      представление эквивалентны — JSON-окружение
++                      state.json): строгая проверка обязательных полей
++                      (trade_id, FIGI, side, order_id==ключу);
++          "invalid" — маркер ПРИСУТСТВУЕТ, но значение пустое (None /
++                      пустая строка), нулевое, нечисловое ("abc"),
++                      неизвестное или НЕ поддерживаемое (в т.ч. 1, 999):
++                      такой cursor НЕ считается legacy и НЕ ослабляет
++                      проверку идентичности — fail-closed
++                      (cursor_invalid_identity_version); автоматическое
++                      повышение версии и молчаливое преобразование формата
++                      исключены.
++        Отсутствие ключа, None, пустая строка, ноль, нечисловая строка и
++        неизвестная числовая версия — РАЗНЫЕ значения маркера; только
++        ОТСУТСТВИЕ ключа означает legacy."""
++        cursor_dict = cursor if isinstance(cursor, dict) else {}
++        if "identity_version" not in cursor_dict:
++            return "legacy"
++        ver = cursor_dict.get("identity_version")
+         try:
+-            return int(str(ver).strip()) == int(
+-                ExecutionMonitor.CURSOR_IDENTITY_VERSION)
++            if int(str(ver).strip()) == int(
++                    ExecutionMonitor.CURSOR_IDENTITY_VERSION):
++                return "new"
+         except (TypeError, ValueError):
+-            return False
++            pass
++        return "invalid"
++
++    @staticmethod
++    def _cursor_is_new_format(cursor) -> bool:
++        """v2.3.9-stage1 (B2 V6, Defect B); v2.3.10-stage1 (B2 V7, Defect A):
++        True — ТОЛЬКО cursor НОВОГО формата (маркер identity_version равен
++        поддерживаемой CURSOR_IDENTITY_VERSION, состояние "new").
++        ВАЖНО: False НЕ означает «legacy» — False возвращается и для
++        LEGACY (ключа нет), и для INVALID/UNKNOWN (маркер пуст,
++        некорректен или не поддерживается); различать состояния следует
++        через _cursor_identity_state() (см. _cursor_identity_conflict_
++        checked / validate_recovery_identity)."""
++        return (ExecutionMonitor._cursor_identity_state(cursor) == "new")
+ 
+     @staticmethod
+     def _cursor_identity_conflict(pos, oid, cursor, snap_tid, snap_figi,
+@@ -1388,18 +1432,24 @@
+ 
+     @staticmethod
+     def cursor_validation_mode(rec) -> str:
+-        """v2.3.9-stage1 (B2 V6, Defect B): режим проверки идентичности
+-        per-order cursor'а recovery-задачи:
+-          "full"           — НОВЫЙ формат cursor'а (identity_version),
+-                             проверены все обязательные идентификаторы;
+-          "legacy_limited" — LEGACY cursor (без маркера версии): проверены
+-                             только реально доступные идентификаторы;
+-                             неполная проверка НЕ выдаётся за полную;
+-          "none"           — cursor отсутствует (no-cursor recovery-путь,
+-                             legacy-снимок) или снимок невосстановим.
++        """v2.3.9-stage1 (B2 V6, Defect B); v2.3.10-stage1 (B2 V7, Defect A):
++        режим проверки идентичности per-order cursor'а recovery-задачи:
++          "full"            — НОВЫЙ формат cursor'а (identity_version равен
++                              поддерживаемой версии), проверены все
++                              обязательные идентификаторы;
++          "legacy_limited"  — LEGACY cursor (ключа identity_version НЕТ):
++                              проверены только реально доступные
++                              идентификаторы; неполная проверка НЕ выдаётся
++                              за полную;
++          "invalid_version" — v2.3.10-stage1 (V7): маркер версии
++                              ПРИСУТСТВУЕТ, но пуст/некорректен/не
++                              поддерживается (None, "", 0, "abc", 1, 999):
++                              fail-closed, НЕ является legacy;
++          "none"            — cursor отсутствует (no-cursor recovery-путь,
++                              legacy-снимок) или снимок невосстановим.
+         Значение сохраняется в задаче (cursor_validation, персистентен в
+-        state.json) — аудит видит, что проверка legacy-записи была
+-        ОГРАНИЧЕННОЙ."""
++        state.json) — аудит видит, какой именно режим проверки применён;
++        некорректная версия не выдаётся ни за полную, ни за legacy."""
+         if not isinstance(rec, dict):
+             return "none"
+         try:
+@@ -1414,14 +1464,45 @@
+         cursor = (getattr(pos, "close_orders", {}) or {}).get(oid)
+         if not isinstance(cursor, dict):
+             return "none"
+-        return ("full" if ExecutionMonitor._cursor_is_new_format(cursor)
+-                else "legacy_limited")
++        cursor_state = ExecutionMonitor._cursor_identity_state(cursor)
++        if cursor_state == "new":
++            return "full"
++        if cursor_state == "legacy":
++            return "legacy_limited"
++        # v2.3.10-stage1 (B2 V7, Defect A): некорректная/неизвестная версия
++        # — отдельный режим (НЕ full, НЕ legacy_limited).
++        return "invalid_version"
++
++    @staticmethod
++    def _cursor_identity_conflict_checked(pos, oid, cursor, snap_tid,
++                                          snap_figi) -> Optional[str]:
++        """v2.3.10-stage1 (B2 V7, Defect A): ЕДИНАЯ точка проверки одного
++        per-order cursor'а по ТРЁМ состояниям маркера identity_version.
++
++        Порядок проверок (ранний выход на первом конфликте):
++          1) state == "invalid" -> "cursor_invalid_identity_version"
++             (fail-closed ДО остальных проверок: пустой, нулевой,
++             нечисловой или неизвестный маркер версии НЕ превращает
++             cursor в legacy и НЕ ослабляет проверку идентичности;
++             автоматического повышения версии и молчаливого
++             преобразования формата нет);
++          2) state == "new"    -> строгая проверка обязательных полей
++             (strict_new_format=True): пустое обязательное поле —
++             cursor_missing_*, противоречие — cursor_*_mismatch;
++          3) state == "legacy" -> проверка всех ДОСТУПНЫХ идентификаторов
++             (strict_new_format=False); неполнота НЕ конфликт.
++        """
++        state = ExecutionMonitor._cursor_identity_state(cursor)
++        if state == "invalid":
++            return "cursor_invalid_identity_version"
++        return ExecutionMonitor._cursor_identity_conflict(
++            pos, oid, cursor, snap_tid, snap_figi, (state == "new"))
+ 
+     @staticmethod
+     def validate_recovery_identity(rec) -> Optional[str]:
+-        """v2.3.8-stage1 (B2 V5, Defect B); v2.3.9-stage1 (B2 V6, Defect B):
+-        проверка согласованности внешней записи recovery-задачи и её снимка
+-        позиции.
++        """v2.3.8-stage1 (B2 V5, Defect B); v2.3.9-stage1 (B2 V6, Defect B);
++        v2.3.10-stage1 (B2 V7, Defect A): проверка согласованности внешней
++        записи recovery-задачи и её снимка позиции.
+ 
+         Возвращает None (задача идентично согласована) или ПРИЧИНУ конфликта
+         (строка). Проверяются:
+@@ -1440,10 +1521,15 @@
+               идентификаторы, противоречие — fail-closed, неполнота —
+               НЕ конфликт, но и НЕ полная проверка
+               (cursor_validation="legacy_limited");
++            - v2.3.10-stage1 (V7): ИНВАЛИДНАЯ/НЕИЗВЕСТНАЯ версия маркера
++              (присутствует, но пуст/некорректен/не поддерживается):
++              конфликт cursor_invalid_identity_version (fail-closed ДО
++              остальных проверок; такой cursor НЕ считается legacy);
+           * существующий cursor по ВТОРОЙ сохранённой ссылке той же
+             close-заявки (клиентский UUID / биржевой ID) также не может
+             противоречить снимку — ни один идентификатор не подменяет
+-            другой.
++            другой (v2.3.10-stage1: та же трёхсостояняя проверка через
++            _cursor_identity_conflict_checked).
+         Отсутствующий cursor (легаси-снимок) НЕ конфликт: опрос невозможен,
+         но и подмены идентичности нет — штатный no_cursor-путь recovery
+         (cursor_validation="none")."""
+@@ -1478,9 +1564,8 @@
+             close_orders = {}
+         cursor = close_orders.get(oid)
+         if cursor is not None:
+-            conflict = ExecutionMonitor._cursor_identity_conflict(
+-                pos, oid, cursor, snap_tid, snap_figi,
+-                ExecutionMonitor._cursor_is_new_format(cursor))
++            conflict = ExecutionMonitor._cursor_identity_conflict_checked(
++                pos, oid, cursor, snap_tid, snap_figi)
+             if conflict is not None:
+                 return conflict
+         # v2.3.9-stage1 (B2 V6): ВТОРАЯ сохранённая ссылка той же
+@@ -1494,9 +1579,8 @@
+         for ref in sorted(other_refs):
+             alt_cursor = close_orders.get(ref)
+             if isinstance(alt_cursor, dict):
+-                conflict = ExecutionMonitor._cursor_identity_conflict(
+-                    pos, ref, alt_cursor, snap_tid, snap_figi,
+-                    ExecutionMonitor._cursor_is_new_format(alt_cursor))
++                conflict = ExecutionMonitor._cursor_identity_conflict_checked(
++                    pos, ref, alt_cursor, snap_tid, snap_figi)
+                 if conflict is not None:
+                     return conflict
+         return None

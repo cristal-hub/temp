@@ -1,0 +1,382 @@
+--- a/test_b2_close_accounting.py
++++ b/test_b2_close_accounting.py
+@@ -19,6 +19,24 @@
+ #      test_11b_unknown_status_without_broker_answer_no_false_closed
+ #   12 test_12_repeated_reconciliation_no_reapply_no_csv_duplicates
+ #
++# ИЗМЕНЕНИЯ (v2.3.4-stage2 — финальные граничные дефекты B2):
++#   13 test_b2_terminal_ledger_record_without_cursor_recovers_broker_commission
++#      (Дефект-1: восстановление фактической комиссии из отчёта брокера,
++#      когда запись реестра уже полна, а per-order cursor отсутствует)
++#   14 test_b2_record_commission_reused_without_broker_poll
++#      (Дефект-1: комиссия, уже сохранённая в записи, используется как
++#      есть — без опроса брокера и без расчётной подстановки)
++#   15 test_b2_terminal_repeat_different_status_is_contradiction
++#      (Дефект-2: CANCELLED 3/10 -> FILL 3/10 — противоречие, UNCERTAIN)
++#   16 test_b2_terminal_repeat_different_price_is_contradiction
++#      (Дефект-2: цена 100 -> 101 при том же исполнении — UNCERTAIN)
++#   17 test_b2_terminal_repeat_different_commission_is_contradiction
++#      (Дефект-2: комиссия 1.5 -> 2.0 — UNCERTAIN)
++#   18 test_b2_terminal_repeat_missing_optional_data_is_idempotent
++#      (Дефект-2: отсутствующее необязательное поле — НЕ противоречие)
++#   19 test_b2_terminal_repeat_exact_report_is_idempotent
++#      (Дефект-2: полностью совпадающий отчёт — безопасный повтор)
++#
+ # Запуск из корня репозитория: pytest test_b2_close_accounting.py -v
+ # Файл работает и из tests/ (раскладка не влияет на импорты).
+ # ТОЛЬКО fake-объекты: без сети, токенов, реального брокера и заявок.
+@@ -695,3 +713,354 @@
+     assert pos.quantity == 0
+     # Дублей CSV нет.
+     assert len(read_trades_csv(isolated_paths)) == 1
++
++
++# ===========================================================================
++# v2.3.4-stage2. Сценарий 13 (Дефект-1). Терминальная запись реестра БЕЗ
++# per-order cursor'а: B2 восстанавливает фактическую комиссию брокера
++# ===========================================================================
++
++def test_b2_terminal_ledger_record_without_cursor_recovers_broker_commission(isolated_paths):
++    """Запись реестра уже полна (терминальный статус, executed_lots,
++    avg_exec_price), per-order cursor в позиции отсутствует, комиссии в
++    записи нет. Раньше опрос брокера не выполнялся и apply_close_execution
++    получал commission=None — фактическая комиссия терялась. Теперь
++    неизвестная комиссия — самостоятельное основание для запроса отчёта
++    брокера; комиссия восстанавливается штатным применением."""
++    ledger = fresh_ledger(isolated_paths)
++    pos = make_buy_pos(quantity=10)
++    monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
++    oid = "sell-ledger-comm"
++    # 1-2. В реестре УЖЕ есть терминальная запись SELL с requested_lots,
++    #       executed_lots и avg_exec_price.
++    assert ledger.record_intent(oid, trade_id=pos.trade_id, figi=pos.figi,
++                                ticker=pos.ticker, side="SELL",
++                                requested_lots=10, reason="close:SL")
++    backdate(ledger, oid, datetime.now(UTC) - timedelta(minutes=59))
++    assert ledger.record_status(oid, "FILL", figi="F1", ticker="TEST",
++                                side="SELL", requested_lots=10,
++                                executed_lots=10, avg_exec_price=100.0)
++    rec = ledger.latest(oid)
++    assert rec["status"] == "FILL"
++    assert int(rec["executed_lots"]) == 10
++    assert float(rec["avg_exec_price"]) == pytest.approx(100.0)
++    # 4. Фактической комиссии в записи нет.
++    assert rec.get("commission") is None
++    # 3. Per-order cursor в позиции отсутствует.
++    assert oid not in (getattr(pos, "close_orders", {}) or {})
++    # 5. Брокерский отчёт возвращает фактическую комиссию 1.25.
++    client = FakeClient(order_state=FakeState(
++        status_code=1, lots_executed=10, price_units=1000,
++        commission=_MV(1, 250000000)))
++
++    action = run(main._try_resolve_absent_position(client, ledger, pos, monitor))
++
++    # 6. B2 применил исполнение штатно (apply_close_execution).
++    assert action == "ledger_close"
++    # Опрос брокера ВЫПОЛНЕН, несмотря на полную запись (ради комиссии).
++    assert any(str(c[0]) == oid for c in client.state_calls)
++    # 7. Cursor получил правильные confirmed/applied.
++    cur = pos.close_orders[oid]
++    assert cur["confirmed_executed_lots"] == 10
++    assert cur["applied_lots"] == 10
++    assert cur["status"] == "FILL"
++    assert cur["avg_exec_price"] == pytest.approx(100.0)
++    # 8. В cursor и позиции сохранена ФАКТИЧЕСКАЯ комиссия брокера.
++    assert cur["commission"] == pytest.approx(1.25)
++    assert pos.actual_commission == pytest.approx(1.25)
++    assert pos.exit_price_confirmed is True
++    assert pos.state == PositionState.CLOSED
++    assert pos.quantity == 0
++    assert len(pos.close_applications) == 1
++    assert pos.executed_lots == 10
++    # 9. Повторный reconcile не дублирует исполнение.
++    second = run(main._try_resolve_absent_position(client, ledger, pos, monitor))
++    assert second == "ledger_close"
++    assert cur["applied_lots"] == 10
++    assert cur["confirmed_executed_lots"] == 10
++    assert cur["commission"] == pytest.approx(1.25)
++    assert len(pos.close_applications) == 1
++    run(main.process_closing(client, monitor, None))
++    rows = read_trades_csv(isolated_paths)
++    assert len(rows) == 1
++    assert rows[0]["actual_commission_rub"] == "1.25"
++
++
++# ===========================================================================
++# v2.3.4-stage2. Сценарий 14 (Дефект-1, доп.). Комиссия, уже достоверно
++# сохранённая в записи реестра, используется как есть
++# ===========================================================================
++
++def test_b2_record_commission_reused_without_broker_poll(isolated_paths):
++    """Комиссия в записи: опрос брокера не требуется вовсе (запись полна —
++    и статус, и цена, и комиссия), сохранённое значение попадает в cursor
++    и позицию БЕЗ расчётной подстановки. Недоступный брокер не мешает."""
++    ledger = fresh_ledger(isolated_paths)
++    pos = make_buy_pos(quantity=10)
++    monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
++    oid = "sell-ledger-comm2"
++    assert ledger.record_intent(oid, trade_id=pos.trade_id, figi=pos.figi,
++                                ticker=pos.ticker, side="SELL",
++                                requested_lots=10, reason="close:TP")
++    backdate(ledger, oid, datetime.now(UTC) - timedelta(minutes=59))
++    assert ledger.record_status(oid, "FILL", figi="F1", ticker="TEST",
++                                side="SELL", requested_lots=10,
++                                executed_lots=10, avg_exec_price=100.0)
++    # Фактическая комиссия достоверно сохранена в записи.
++    ledger._latest[oid]["commission"] = 2.5
++    # Брокер недоступен: корректная реализация НЕ опрашивает его вовсе.
++    client = FakeClient(order_state=None)
++
++    action = run(main._try_resolve_absent_position(client, ledger, pos, monitor))
++
++    assert action == "ledger_close"
++    # Опроса нет: в записи уже всё известно, включая комиссию.
++    assert client.state_calls == []
++    cur = pos.close_orders[oid]
++    # Сохранённая фактическая комиссия — не расчётная (модельная для
++    # оборота (100+100)*10 дала бы 0.5/3.0 при COMMISSION_PER_SIDE
++    # 0.0005/0.003 — ни одно не равно 2.5).
++    assert cur["commission"] == pytest.approx(2.5)
++    assert pos.actual_commission == pytest.approx(2.5)
++    assert cur["avg_exec_price"] == pytest.approx(100.0)
++    assert pos.state == PositionState.CLOSED
++    assert pos.quantity == 0
++
++
++# ===========================================================================
++# v2.3.4-stage2. Сценарий 15 (Дефект-2). Повтор терминального отчёта со
++# СМЕНЕННЫМ статусом (CANCELLED 3/10 -> FILL 3/10) — противоречие
++# ===========================================================================
++
++def test_b2_terminal_repeat_different_status_is_contradiction(isolated_paths):
++    """Первый отчёт CANCELLED 3/10 учтён; второй отчёт FILL 3/10 при том же
++    исполнении ПРОТИВОРЕЧИТ зафиксированному терминальному результату.
++    Совпадение количества и терминальности cursor'а не маскирует конфликт:
++    UNCERTAIN, без повторного применения, без закрытия позиции."""
++    ledger = fresh_ledger(isolated_paths)
++    pos = make_buy_pos(quantity=10)
++    monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
++    oid = "sell-rep-status"
++    setup_close_sell(ledger, pos, oid, requested=10)
++    ledger.record_sent(oid, figi="F1", ticker="TEST", side="SELL",
++                       requested_lots=10, executed_lots=0, status_hint="NEW")
++    # Первый терминальный отчёт: CANCELLED 3/10.
++    first_client = FakeClient(order_state=FakeState(
++        status_code=3, lots_executed=3, price_units=330,
++        commission=_MV(1, 500000000)))
++    assert run(main._try_resolve_absent_position(first_client, ledger, pos, monitor)) \
++        == "ledger_close"
++    cur = pos.close_orders[oid]
++    assert cur["status"] == "CANCELLED"
++    assert cur["applied_lots"] == 3
++    assert cur["confirmed_executed_lots"] == 3
++    assert pos.quantity == 0  # остаток закрыт внешне первой обработкой
++
++    # Второй отчёт: статус сменился на FILL при том же исполнении 3/10.
++    second_client = FakeClient(order_state=FakeState(
++        status_code=1, lots_executed=3, price_units=330,
++        commission=_MV(1, 500000000)))
++    action = run(main._try_resolve_absent_position(second_client, ledger, pos, monitor))
++
++    # Fail-closed: противоречие зафиксировано, учёт НЕ закрыт повторно.
++    assert action == "uncertain"
++    assert pos.state == PositionState.UNCERTAIN
++    assert second_client.uncertain_state is True
++    # Повторного применения нет: cursor заморожен на первом результате.
++    assert cur["applied_lots"] == 3
++    assert cur["confirmed_executed_lots"] == 3
++    assert cur["status"] == "CANCELLED"       # статус второго отчёта НЕ применён
++    assert cur["commission"] == pytest.approx(1.5)
++    assert len(pos.close_applications) == 1
++    assert pos.executed_lots == 3
++    assert pos.quantity == 0                  # количество позиции не менялось
++    # Диагностическое событие записано.
++    events = (isolated_paths / "research_events.jsonl").read_text(encoding="utf-8")
++    assert "SELL_CLOSE_REPORT_CONTRADICTION" in events
++    # Позиция UNCERTAIN в CSV не пишется (без закрытия вторым отчётом).
++    run(main.process_closing(second_client, monitor, None))
++    assert read_trades_csv(isolated_paths) == []
++
++
++# ===========================================================================
++# v2.3.4-stage2. Сценарий 16 (Дефект-2). Повтор с ДРУГОЙ ценой исполнения
++# (100 -> 101) при том же исполнении — противоречие
++# ===========================================================================
++
++def test_b2_terminal_repeat_different_price_is_contradiction(isolated_paths):
++    """Первый терминальный отчёт с ценой 100 учтён; второй с ценой 101 при
++    том же исполнении противоречит подтверждённой цене cursor'а — UNCERTAIN."""
++    ledger = fresh_ledger(isolated_paths)
++    pos = make_buy_pos(quantity=10)
++    monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
++    oid = "sell-rep-price"
++    setup_close_sell(ledger, pos, oid, requested=10)
++    ledger.record_sent(oid, figi="F1", ticker="TEST", side="SELL",
++                       requested_lots=10, executed_lots=0, status_hint="NEW")
++    # Первый отчёт: CANCELLED 3/10 по цене 100 (300 / 3 лот. / lot=1).
++    first_client = FakeClient(order_state=FakeState(
++        status_code=3, lots_executed=3, price_units=300))
++    assert run(main._try_resolve_absent_position(first_client, ledger, pos, monitor)) \
++        == "ledger_close"
++    cur = pos.close_orders[oid]
++    assert cur["avg_exec_price"] == pytest.approx(100.0)
++    assert cur["applied_lots"] == 3
++
++    # Второй отчёт: та же заявка, но цена 101.
++    second_client = FakeClient(order_state=FakeState(
++        status_code=3, lots_executed=3, price_units=303))
++    action = run(main._try_resolve_absent_position(second_client, ledger, pos, monitor))
++
++    assert action == "uncertain"
++    assert pos.state == PositionState.UNCERTAIN
++    assert second_client.uncertain_state is True
++    # Подтверждённая цена cursor'а НЕ перезаписана, исполнения не применены.
++    assert cur["avg_exec_price"] == pytest.approx(100.0)
++    assert cur["applied_lots"] == 3
++    assert cur["confirmed_executed_lots"] == 3
++    assert len(pos.close_applications) == 1
++    assert pos.quantity == 0
++    events = (isolated_paths / "research_events.jsonl").read_text(encoding="utf-8")
++    assert "SELL_CLOSE_REPORT_CONTRADICTION" in events
++
++
++# ===========================================================================
++# v2.3.4-stage2. Сценарий 17 (Дефект-2). Повтор с ДРУГОЙ фактической
++# комиссией (1.5 -> 2.0) при том же исполнении — противоречие
++# ===========================================================================
++
++def test_b2_terminal_repeat_different_commission_is_contradiction(isolated_paths):
++    """Первый терминальный отчёт с фактической комиссией 1.5 учтён; второй с
++    комиссией 2.0 противоречит подтверждённой комиссии cursor'а — UNCERTAIN."""
++    ledger = fresh_ledger(isolated_paths)
++    pos = make_buy_pos(quantity=10)
++    monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
++    oid = "sell-rep-comm"
++    setup_close_sell(ledger, pos, oid, requested=10)
++    ledger.record_sent(oid, figi="F1", ticker="TEST", side="SELL",
++                       requested_lots=10, executed_lots=0, status_hint="NEW")
++    # Первый отчёт: CANCELLED 3/10, комиссия 1.5.
++    first_client = FakeClient(order_state=FakeState(
++        status_code=3, lots_executed=3, price_units=330,
++        commission=_MV(1, 500000000)))
++    assert run(main._try_resolve_absent_position(first_client, ledger, pos, monitor)) \
++        == "ledger_close"
++    cur = pos.close_orders[oid]
++    assert cur["commission"] == pytest.approx(1.5)
++    assert cur["applied_lots"] == 3
++
++    # Второй отчёт: та же заявка/исполнение/цена, но комиссия 2.0.
++    second_client = FakeClient(order_state=FakeState(
++        status_code=3, lots_executed=3, price_units=330,
++        commission=_MV(2, 000000000)))
++    action = run(main._try_resolve_absent_position(second_client, ledger, pos, monitor))
++
++    assert action == "uncertain"
++    assert pos.state == PositionState.UNCERTAIN
++    assert second_client.uncertain_state is True
++    # Подтверждённая комиссия cursor'а НЕ перезаписана.
++    assert cur["commission"] == pytest.approx(1.5)
++    assert cur["applied_lots"] == 3
++    assert cur["confirmed_executed_lots"] == 3
++    assert len(pos.close_applications) == 1
++    assert pos.quantity == 0
++    events = (isolated_paths / "research_events.jsonl").read_text(encoding="utf-8")
++    assert "SELL_CLOSE_REPORT_CONTRADICTION" in events
++
++
++# ===========================================================================
++# v2.3.4-stage2. Сценарий 18 (Дефект-2). Повтор БЕЗ необязательного поля
++# (комиссия отсутствует в новом отчёте) — НЕ противоречие, идемпотентно
++# ===========================================================================
++
++def test_b2_terminal_repeat_missing_optional_data_is_idempotent(isolated_paths):
++    """Новый отчёт не передал комиссию (отсутствующее значение), а в
++    cursor'е она подтверждена. Отсутствие данных — не несовпадение двух
++    достоверных значений: безопасный повтор, лоты повторно не списываются,
++    частичный результат и error_note первой обработки не искажаются."""
++    ledger = fresh_ledger(isolated_paths)
++    pos = make_buy_pos(quantity=10)
++    monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
++    oid = "sell-rep-missing"
++    setup_close_sell(ledger, pos, oid, requested=10)
++    ledger.record_sent(oid, figi="F1", ticker="TEST", side="SELL",
++                       requested_lots=10, executed_lots=0, status_hint="NEW")
++    # Первый отчёт: CANCELLED 3/10, комиссия 1.5.
++    first_client = FakeClient(order_state=FakeState(
++        status_code=3, lots_executed=3, price_units=330,
++        commission=_MV(1, 500000000)))
++    assert run(main._try_resolve_absent_position(first_client, ledger, pos, monitor)) \
++        == "ledger_close"
++    cur = pos.close_orders[oid]
++    assert cur["commission"] == pytest.approx(1.5)
++    assert pos.partial is True
++
++    # Второй отчёт: те же статус/лоты/цена, НО без комиссии.
++    second_client = FakeClient(order_state=FakeState(
++        status_code=3, lots_executed=3, price_units=330))
++    action = run(main._try_resolve_absent_position(second_client, ledger, pos, monitor))
++
++    # Безопасный повтор (не противоречие).
++    assert action == "ledger_close"
++    assert second_client.uncertain_state is False
++    # Лоты повторно не списаны; сохранённая комиссия не затёрта None.
++    assert cur["applied_lots"] == 3
++    assert cur["confirmed_executed_lots"] == 3
++    assert cur["commission"] == pytest.approx(1.5)
++    assert len(pos.close_applications) == 1
++    assert pos.actual_commission == pytest.approx(1.5)
++    # Частичный результат первой обработки сохранён (идемпотентность повтора).
++    assert pos.partial is True
++    assert "частичное исполнение SELL (3/10" in pos.error_note
++    # CSV: одна строка, частичное исполнение отражено.
++    run(main.process_closing(second_client, monitor, None))
++    rows = read_trades_csv(isolated_paths)
++    assert len(rows) == 1
++    assert rows[0]["execution_status"] == "FILL_PARTIAL"
++    assert "частичное исполнение SELL (3/10" in rows[0]["error_note"]
++
++
++# ===========================================================================
++# v2.3.4-stage2. Сценарий 19 (Дефект-2). Полностью совпадающий повторный
++# терминальный отчёт — безопасный повтор
++# ===========================================================================
++
++def test_b2_terminal_repeat_exact_report_is_idempotent(isolated_paths):
++    """Идентичный терминальный отчёт (статус, лоты, цена, комиссия)
++    остаётся безопасным повтором: расширенная проверка идентичности не даёт
++    ложных противоречий, повторного списания нет."""
++    ledger = fresh_ledger(isolated_paths)
++    pos = make_buy_pos(quantity=10)
++    monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
++    oid = "sell-rep-exact"
++    setup_close_sell(ledger, pos, oid, requested=10)
++    ledger.record_sent(oid, figi="F1", ticker="TEST", side="SELL",
++                       requested_lots=10, executed_lots=0, status_hint="NEW")
++    first_client = FakeClient(order_state=FakeState(
++        status_code=3, lots_executed=3, price_units=330,
++        commission=_MV(0, 500000000)))
++    assert run(main._try_resolve_absent_position(first_client, ledger, pos, monitor)) \
++        == "ledger_close"
++    cur = pos.close_orders[oid]
++    applied_after_first = cur["applied_lots"]
++    history_after_first = list(pos.close_applications)
++
++    # Полностью совпадающий второй отчёт.
++    second_client = FakeClient(order_state=FakeState(
++        status_code=3, lots_executed=3, price_units=330,
++        commission=_MV(0, 500000000)))
++    action = run(main._try_resolve_absent_position(second_client, ledger, pos, monitor))
++
++    assert action == "ledger_close"
++    assert second_client.uncertain_state is False
++    assert cur["applied_lots"] == applied_after_first == 3
++    assert cur["confirmed_executed_lots"] == 3
++    assert cur["avg_exec_price"] == pytest.approx(110.0)
++    assert cur["commission"] == pytest.approx(0.5)
++    assert pos.close_applications == history_after_first  # история не выросла
++    assert pos.executed_lots == 3
++    assert pos.quantity == 0
++    assert pos.state == PositionState.CLOSED
++    assert pos.partial is True
++    run(main.process_closing(second_client, monitor, None))
++    assert len(read_trades_csv(isolated_paths)) == 1

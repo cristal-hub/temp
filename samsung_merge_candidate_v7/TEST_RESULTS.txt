@@ -1,0 +1,107 @@
+TEST_RESULTS.txt — samsung_merge_candidate_v7 (v2.3.10-stage1)
+Окружение: Python 3.12.16, pytest 9.0.2, Linux sandbox.
+Команда полного прогона: python3 -m pytest -p no:cacheprovider --continue-on-collection-errors -q
+Команда B2-прогонов: те же опции, файлы B2 передаются списком.
+
+=============================================================================
+1. BASELINE (точный код v6 — чистая копия env_v7 ДО изменений V7)
+=============================================================================
+Полный pytest:            74 failed, 643 passed, 1 error
+                          лог: appendix_BASELINE_FULL_PYTEST.txt
+Старые B2-тесты v1–v6:    77 passed  (61 прежних + 16 тестов V6-A..P)
+                          лог: appendix_BASELINE_B2_TESTS_OUTPUT.txt
+FAILED ПО ИМЕНАМ:         74 FAILED + 1 collection ERROR
+                          лог: appendix_baseline_failed_names.txt
+ERROR/collection:         ровно один — ERROR test_execution.py
+                          (pre-existing collection error корня test_execution.py,
+                          FileNotFoundError; НЕ связан с B2; присутствовал
+                          в baseline и final всех кандидатов v5/v6)
+
+=============================================================================
+2. FINAL (код v7 после изменений)
+=============================================================================
+Полный pytest:            74 failed, 662 passed, 1 error
+                          лог: appendix_FINAL_FULL_PYTEST.txt
+                          разница с baseline: +19 passed (pytest-итемы V7)
+Старые B2-тесты v1–v5
+файлы (прямое
+сравнение с V6-логом):    61 passed — appendix_B2_TESTS_OUTPUT.txt
+                          (collected 61 items: 20+14+8+9+10)
+ВСЕ старые B2 v1–v6:      77 passed — appendix_OLD_B2_TESTS_V1_V6_OUTPUT.txt
+                          (61 прежних + 16 тестов V6-A..P)
+Новые V7-тесты:           19 passed — appendix_V7_TESTS_OUTPUT.txt
+                          (13 тестовых функций; V7-E параметризована ×7)
+
+=============================================================================
+3. СРАВНЕНИЕ FAILED ПО КОНКРЕТНЫМ ИМЕНАМ (не по количеству)
+=============================================================================
+diff appendix_baseline_failed_names.txt appendix_final_failed_names.txt
+  => пусто (нет НИ одного нового или исчезнувшего FAILED)
+Дополнительно: финальный FAILED/ERROR-набор v7 побайтово совпадает с
+финальным набором v6 (74 FAILED + ERROR test_execution.py).
+ERROR/collection final: ровно один — ERROR test_execution.py, идентичен
+baseline (причина не связана с изменёнными файлами: корневой
+test_execution.py требует рабочее дерево робота и падает на сборке так же,
+как в v5/v6; B2-тесты его не используют).
+
+=============================================================================
+4. НЕГАТИВНАЯ ВАЛИДАЦИЯ (V7-тесты на коде v6 ДО исправлений)
+=============================================================================
+Результат: 18 failed, 1 passed — appendix_NEGATIVE_VALIDATION_OLD_CODE.txt
+Ловятся оба дефекта:
+  * Дефект №1: V7-C/D/E(×7)/F — на v6 некорректная версия трактовалась как
+    legacy (конфликта не было: assert None == 'cursor_invalid_identity_version');
+    V7-A/B падают на отсутствии в v6 трёхсостоянийого API
+    (_cursor_identity_state).
+  * Дефект №2: V7-H/I/J/K/L/M — на v6 чужой timestamp БРАЛСЯ без проверки
+    (close_requested_at == '2026-11-20T10:05:00+00:00' — ровно описанный
+    дефект; mixing V7-M подтверждён обеими сторонами).
+  * V7-G (положительный путь, полностью согласованные данные) — единственный
+    проходящий на старом коде: безусловное принятие v6 на согласованных
+    данных даёт тот же результат; негативные варианты H–M на v6 падают.
+  Факты не скрыты и не подгонялись.
+
+=============================================================================
+5. ОЖИДАЕМЫЙ РЕЗУЛЬТАТ ОТНОСИТЕЛЬНО V6 — ВЫПОЛНЕН
+=============================================================================
+* старые 61 B2-тест (v1–v5 файлы) проходят          : ДА (61 passed)
+* все старые B2 v1–v6 проходят                      : ДА (77 passed)
+* новые V7-тесты проходят                           : ДА (19 passed)
+* новых FAILED нет                                  : ДА (diff имён пуст)
+* существующие baseline FAILED те же                : ДА (74, по именам идентичны)
+* существующий collection ERROR тот же              : ДА (test_execution.py,
+  причина не связана с изменёнными файлами)
+
+=============================================================================
+6. ИСПОЛЬЗОВАННЫЕ ФАЙЛЫ-ЛОГИ
+=============================================================================
+appendix_BASELINE_FULL_PYTEST.txt          baseline полный pytest
+appendix_BASELINE_B2_TESTS_OUTPUT.txt      baseline старых B2 v1–v6 (77) на коде v6
+appendix_FINAL_FULL_PYTEST.txt             final полный pytest
+appendix_baseline_failed_names.txt         baseline FAILED+ERROR по именам (75)
+appendix_final_failed_names.txt            final FAILED+ERROR по именам (75)
+appendix_B2_TESTS_OUTPUT.txt               61 прежних B2 (v1–v5 файлы) на v7
+appendix_OLD_B2_TESTS_V1_V6_OUTPUT.txt     все старые B2 v1–v6 (77) на v7
+appendix_V7_TESTS_OUTPUT.txt               19 новых V7-тестов на v7
+appendix_NEGATIVE_VALIDATION_OLD_CODE.txt  V7-тесты на коде v6 (18 failed / 1 passed)
+
+=============================================================================
+7. ПРОВЕРКИ БЕЗОПАСНОСТИ И ЦЕЛОСТНОСТИ
+=============================================================================
+* Секреты (токены/API-ключи/пароли/секреты/личные конфигурации):
+  СКАНИРОВАНИЕ ВЫПОЛНЕНО — НЕ ОБНАРУЖЕНЫ (шаблоны: token, api_key, secret,
+  password, Authorization, Bearer, BEGIN PRIVATE KEY, .env).
+* ZIP Tsclp_B2_V7_candidate.zip: integrity OK (unzip -t), полный список
+  файлов сверен с README §1, SHA256 архива — в итоговом сообщении GLM
+  (архив не может содержать собственный хэш).
+* В архиве именно V7: исходники = v7-SHA256, старые тесты побайтово
+  идентичны v6, новых/чужих файлов разных кандидатов нет.
+* V1–V6 не изменялись; Samsung не изменялся (SHA256 до/после совпадают);
+  торговые операции не выполнялись; state.json не изменялся.
+
+STRATEGY LOGIC: UNCHANGED
+RESEARCH ONLY
+NO THRESHOLD IS OPTIMIZED
+NO FILTER IS INSTALLED
+NO LIVE ORDERS
+OOS SEALED / H4 EXECUTION NOT AUTHORIZED

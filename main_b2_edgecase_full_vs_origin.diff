@@ -1,0 +1,472 @@
+--- a/main.py
++++ b/main.py
+@@ -390,6 +390,67 @@
+ #            кандидатов не трогают).
+ #       P0-5, OrderLedger, per-order cursor, fail-closed — без ослаблений.
+ #
++# ИЗМЕНЕНИЯ (v2.3.4-stage1 — аудит B2 close accounting):
++#
++#   В2 (терминальный отчёт своей SELL при отсутствии позиции у брокера).
++#       РАНЬШЕ: учёт закрывался напрямую _finalize_position_closed() в обход
++#       ExecutionMonitor.apply_close_execution() — позиция получала CLOSED,
++#       но per-order cursor (close_orders), история применений
++#       (close_applications), комиссия и синхронизация реестра оставались
++#       несогласованными; запрошенное количество затиралось исполненным,
++#       частичное исполнение не отражалось в CSV (execution_status=FILL).
++#       ТЕПЕРЬ: исполнение применяется ШТАТНО apply_close_execution()
++#       (per-order cursor, история, цена, комиссия, идемпотентный повтор
++#       терминального отчёта); запись реестра синхронизируется терминальным
++#       статусом (как в resolve_closing); False различается: безопасный
++#       повтор (исполнение уже учтено cursor'ом) vs противоречивый отчёт
++#       (fail-closed: UNCERTAIN, учёт НЕ закрывается). Частичное исполнение
++#       (SELL 3/10 -> CANCELLED, позиции нет у брокера): учтённые лоты —
++#       только фактически исполненные 3 (cursor), запрошенные 10
++#       сохраняются в CSV, остаток закрывается как внешнее закрытие (без
++#       цены/P&L, явная пометка в error_note), execution_status=FILL_PARTIAL.
++#       В3 (внешнее закрытие без своей SELL) — без изменений по смыслу.
++#
++# ИЗМЕНЕНИЯ (v2.3.4-stage2 — финальные граничные дефекты B2):
++#
++#   Дефект-1 (потеря фактической комиссии при полной записи реестра).
++#       РАНЬШЕ: при записи реестра с терминальным статусом, executed_lots>0
++#       и avg_exec_price>0 опрос брокера не выполнялся вовсе, commission
++#       оставалась None и apply_close_execution() получал commission=None,
++#       хотя фактическая комиссия доступна в брокерском отчёте.
++#       ТЕПЕРЬ: неизвестная комиссия — самостоятельное основание для запроса
++#       отчёта брокера (отсутствие необходимости повторно запрашивать цену
++#       не отменяет получения комиссии). Комиссия, уже достоверно
++#       сохранённая в записи, используется как есть; расчётная комиссия не
++#       подставляется; достоверная комиссия не перезаписывается
++#       отсутствующим значением; при недоступном отчёте комиссия не
++#       выдумывается (учёт без комиссии — без фиктивных финансовых данных).
++#
++#   Дефект-2 (недостаточная проверка идентичности повторного терминального
++#   отчёта).
++#       РАНЬШЕ: безопасным повтором считался любой отчёт при терминальном
++#       cursor'е и совпадении confirmed/applied с исполнением — смена
++#       статуса (CANCELLED 3/10 -> FILL 3/10), цены исполнения или
++#       комиссии маскировалась под безопасный повтор.
++#       ТЕПЕРЬ: безопасен ТОЛЬКО отчёт, согласующийся с сохранённым
++#       терминальным состоянием cursor'а: тот же терминальный статус
++#       (_canonical_report_status: числовые коды нормализуются к именам),
++#       те же cumulative лоты, та же подтверждённая цена исполнения и та
++#       же подтверждённая фактическая комиссия (_confirmed_value_conflicts).
++#       Отсутствующее значение в новом отчёте — НЕ противоречие (отсутствие
++#       данных != несовпадение двух достоверных значений). Противоречие =
++#       fail-closed: без повторного применения, без изменения количества,
++#       без закрытия учёта, позиция UNCERTAIN, client.uncertain_state=True,
++#       блокировка новых входов, диагностическое событие
++#       SELL_CLOSE_REPORT_CONTRADICTION (с полями отчёта и cursor'а),
++#       повторная SELL не отправляется.
++#       Дополнительно: безопасный повтор больше не понижает
++#       pos.partial=True -> False и не затирает сформированный error_note
++#       первой обработки (иначе CSV-строка частичного исполнения
++#       искажалась при записи после повтора).
++#       execution.py / order_ledger.py НЕ изменялись; B3, стратегия,
++#       сигналы, SL/TP, риск-модель — без изменений.
++#
+ 
+ import asyncio
+ import csv
+@@ -1149,10 +1210,16 @@
+                               close_reason: str, order_id: str,
+                               requested_at: str, note: str,
+                               price_confirmed: bool = False):
+-    """Пакет В2/В3: единая точка закрытия учёта позиции, когда брокерская
+-    заявка не может быть обработана штатно (позиция уже отсутствует у
+-    брокера). CSV-строка будет записана штатным process_closing (logged=False);
+-    note попадает в error_note CSV (динамический атрибут, не персистится).
++    """Пакет В3 (v2.3.4): закрытие учёта при ВНЕШНЕМ (ручном) закрытии, когда
++    брокерская заявка не может быть обработана штатно (позиция уже
++    отсутствует у брокера, своей SELL-заявки нет).
++
++    v2.3.4-stage1 (аудит B2 close accounting): В2 больше НЕ использует эту
++    функцию — исполнение своей SELL применяется штатно
++    ExecutionMonitor.apply_close_execution() (per-order cursor, история,
++    комиссия, идемпотентность). CSV-строка будет записана штатным
++    process_closing (logged=False); note попадает в error_note CSV
++    (динамический атрибут, не персистится).
+ 
+     v2.3.1-stage1 (ТЗ-5): price_confirmed=True ТОЛЬКО когда exit_price взят
+     из реального исполненного ордера этой позиции (В2: отчёт брокера/реестр).
+@@ -1186,11 +1253,47 @@
+     return pos
+ 
+ 
++def _canonical_report_status(raw) -> str:
++    """v2.3.4-stage2 (Дефект-2): каноническое имя статуса для сравнения
++    идентичности повторных терминальных отчётов. Числовые коды T-Invest
++    (1/2/3/...) переводятся в имена (FILL/REJECTED/CANCELLED/...), регистр
++    нормализуется. Неизвестные значения возвращаются как есть (в верхнем
++    регистре) — сравнение остаётся консервативным."""
++    s = str(raw or "").strip().upper()
++    if s.isdigit():
++        return _STATUS_NAME_BY_CODE.get(int(s), s)
++    return s
++
++
++def _confirmed_value_conflicts(saved, reported) -> bool:
++    """v2.3.4-stage2 (Дефект-2): True — ТОЛЬКО когда ОБА значения достоверны
++    (не None) и различаются сверх денежного допуска.
++
++    Отсутствующее значение (None с любой стороны) — НЕ противоречие:
++    отсутствие данных в новом отчёте (например, отчёт впервые не передал
++    комиссию, которая уже сохранена в cursor'е) не равно несовпадению двух
++    достоверных значений. Непарсируемое «достоверное» значение трактуется
++    консервативно как конфликт (fail-closed)."""
++    if saved is None or reported is None:
++        return False
++    try:
++        fs, fr = float(saved), float(reported)
++    except (TypeError, ValueError):
++        return True
++    return abs(fs - fr) > 1e-9
++
++
+ async def _try_resolve_absent_position(client: TinkoffClient,
+-                                       ledger: Optional[OrderLedger], pos) -> str:
++                                       ledger: Optional[OrderLedger], pos,
++                                       monitor: Optional[ExecutionMonitor] = None) -> str:
+     """Пакет В2/В3 для ветки reconcile «активная позиция локально,
+     у брокера отсутствует» (достоверный снимок).
+ 
++    v2.3.4-stage1: monitor (опционально) — ExecutionMonitor, чей штатный
++    per-order механизм apply_close_execution() применяется в В2; при
++    отсутствии используется monitor_ref (production) или изолированный
++    экземпляр (методы только мутируют pos, общего состояния не требуют).
++
+     Возвращает:
+       "ledger_close"   — учёт закрыт по СВОЕЙ SELL-заявке (В2);
+       "external_close" — учёт закрыт как внешнее (ручное) закрытие после
+@@ -1205,6 +1308,7 @@
+                          (RECONCILE_MISMATCH + блокировка новых входов).
+     """
+     ticker = pos.ticker
++    close_side = "SELL" if pos.direction == "BUY" else "BUY"
+     # --- В2: своя SELL-заявка закрытия ---
+     for rec in _match_own_close_sell(ledger, pos):
+         oid = str(rec.get("order_id") or "")
+@@ -1217,6 +1321,7 @@
+             executed, requested = 0, 0
+         status = rec.get("status")
+         price = None
++        commission = None  # фактическая комиссия — из записи реестра или отчёта брокера
+         rec_price = rec.get("avg_exec_price")
+         if rec_price is not None:
+             try:
+@@ -1224,9 +1329,28 @@
+                 price = p if p > 0 else None
+             except (TypeError, ValueError):
+                 price = None
++        # v2.3.4-stage2 (Дефект-1: потеря фактической комиссии). Комиссия,
++        # УЖЕ достоверно сохранённая в записи реестра (если хранится),
++        # используется как есть; расчётная (модельная) комиссия не
++        # подставляется никогда.
++        rec_commission = rec.get("commission")
++        if rec_commission is not None:
++            try:
++                c = float(rec_commission)
++                commission = c if c > 0 else None
++            except (TypeError, ValueError):
++                commission = None
+         # Уточняем статус/исполнение/цену у брокера, если запись неполная.
++        # v2.3.4-stage2 (Дефект-1): НЕИЗВЕСТНАЯ комиссия — самостоятельное
++        # основание для запроса отчёта брокера. Отсутствие необходимости
++        # повторно запрашивать ЦЕНУ (запись уже содержит терминальный
++        # статус, executed_lots и avg_exec_price) не отменяет получения
++        # фактической комиссии — раньше при полной записи опрос не
++        # выполнялся и apply_close_execution получал commission=None,
++        # хотя фактическая комиссия доступна в брокерском отчёте.
+         # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи реестра.
+-        if executed <= 0 or status not in _TERMINAL_ORDER_STATUSES or price is None:
++        if (executed <= 0 or status not in _TERMINAL_ORDER_STATUSES
++                or price is None or commission is None):
+             state = await _poll_ledger_order_state(client, rec)
+             if state is not None:
+                 status = _status_name(getattr(state, "execution_report_status", None)) or status
+@@ -1238,6 +1362,15 @@
+                 p = ExecutionMonitor._extract_price(state, executed, lot)
+                 if p:
+                     price = p
++                # v2.3.4: фактическая комиссия брокера сохраняется (если
++                # доступна) и попадает в штатное применение исполнения.
++                # v2.3.4-stage2 (Дефект-1): уже сохранённая достоверная
++                # комиссия НЕ перезаписывается — в том числе отсутствующим
++                # значением отчёта; при недоступном отчёте комиссия не
++                # выдумывается (остаётся None — CSV/учёт без комиссии).
++                broker_commission = ExecutionMonitor._extract_commission(state)
++                if commission is None:
++                    commission = broker_commission
+         if executed <= 0:
+             continue  # эта заявка не доказывает исполнение — следующий кандидат
+         # v2.3.2-stage1 (Дефект-1: нетерминальная SELL-заявка). После
+@@ -1280,42 +1413,230 @@
+                 f"новые входы заблокированы до терминального статуса заявки."
+             )
+             return "uncertain"
+-        sold = min(executed, int(pos.quantity) or executed)
+-        full = requested > 0 and executed >= requested
+         reason_text = str(rec.get("reason") or "")
+         close_reason = "LEDGER_CLOSE"
+         if reason_text.startswith("close:"):
+             close_reason = reason_text[len("close:"):].split()[0].upper() or close_reason
++        # ---- v2.3.4-stage1 (аудит B2 close accounting): исполнение СВОЕЙ
++        # SELL-заявки применяется ШТАТНЫМ per-order механизмом
++        # ExecutionMonitor.apply_close_execution(): per-order cursor
++        # (confirmed_executed_lots/applied_lots), история close_applications,
++        # фактическая цена исполнения и комиссия, идемпотентный повтор
++        # терминального отчёта. Раньше учёт закрывался напрямую через
++        # _finalize_position_closed() в обход cursor'а — позиция получала
++        # CLOSED при несогласованном close_orders/реестре (первопричина
++        # дефекта). _finalize_position_closed остаётся ТОЛЬКО за В3.
++        try:
++            requested_lots = int(rec.get("requested_lots") or 0) or None
++        except (TypeError, ValueError):
++            requested_lots = None
++        # ЭТАП 5Б: oid записи реестра робота — КЛИЕНТСКИЙ UUID (ключ
++        # record_intent). При потере обеих ссылок позиции (крах между
++        # отправкой и сохранением state) восстанавливаем
++        # close_order_request_id — тогда apply_close_execution синхронизирует
++        # legacy-поля, а CSV-строка получит order_id.
++        if (not getattr(pos, "close_order_request_id", None)
++                and not pos.close_order_id):
++            pos.close_order_request_id = oid
++        # Защита как в resolve_closing: legacy close_applied_lots без
++        # per-order истории нельзя безопасно переносить на заявку
++        # (двойное списание) — fail-closed.
++        legacy_applied = int(getattr(pos, "close_applied_lots", 0) or 0)
++        if oid not in (getattr(pos, "close_orders", {}) or {}) and legacy_applied:
++            pos.state = PositionState.UNCERTAIN
++            client.uncertain_state = True
++            logging.error(
++                f"[reconcile] {ticker}: legacy close_applied_lots="
++                f"{legacy_applied} без per-order истории для SELL {oid} — "
++                f"учёт НЕ закрыт (fail-closed)"
++            )
++            return "uncertain"
++        monitor_obj = (monitor if monitor is not None
++                       else (monitor_ref or ExecutionMonitor(client)))
++        applied_ok = monitor_obj.apply_close_execution(
++            pos, oid, executed, status,
++            execution_price=price, commission=commission,
++            requested_lots=requested_lots,
++        )
++        cursor = (getattr(pos, "close_orders", {}) or {}).get(oid) or {}
++        if not applied_ok:
++            # False НЕ означает автоматически ошибку: повтор ТОГО ЖЕ
++            # терминального отчёта возвращает False без изменения состояния
++            # (идемпотентность per-order cursor'а). Безопасным повтором
++            # считаем ТОЛЬКО отчёт, СОГЛАСУЮЩИЙСЯ с уже сохранённым
++            # терминальным состоянием cursor'а — исполнение было учтено
++            # штатно (resolve_closing / предыдущий В2), повторного
++            # списания НЕТ. Иначе — противоречивый отчёт: учёт НЕ
++            # закрывается, позиция UNCERTAIN, новые входы заблокированы,
++            # повторная SELL запрещена.
++            #
++            # v2.3.4-stage2 (Дефект-2: недостаточная проверка идентичности
++            # повтора). Совпадение количества и терминальности cursor'а само
++            # по себе НЕ делает повтор безопасным: отчёт CANCELLED 3/10,
++            # дополненный позже отчётом FILL 3/10, имеет те же лоты, но
++            # ПРОТИВОРЕЧИТ ранее зафиксированному терминальному результату.
++            # Идентичность проверяется по ВСЕМ сохранённым достоверным
++            # фактам: терминальный статус (тот же), cumulative исполненных
++            # лотов (те же), цена исполнения (если уже подтверждена в
++            # cursor'е) и фактическая комиссия (если уже подтверждена).
++            # Отсутствующее значение в новом отчёте — НЕ противоречие
++            # (_confirmed_value_conflicts): отсутствие данных не равно
++            # несовпадению двух достоверных значений. Противоречие =
++            # fail-closed: повторное применение НЕ выполняется, количество
++            # позиции не меняется, учёт не закрывается, позиция
++            # переводится в UNCERTAIN, блокировка новых входов сохраняется.
++            try:
++                cur_confirmed = int(cursor.get("confirmed_executed_lots") or 0)
++                cur_applied = int(cursor.get("applied_lots") or 0)
++            except (TypeError, ValueError):
++                cur_confirmed, cur_applied = -1, -1
++            cur_status = _canonical_report_status(cursor.get("status"))
++            report_status = _canonical_report_status(status)
++            price_conflict = _confirmed_value_conflicts(
++                cursor.get("avg_exec_price"), price)
++            commission_conflict = _confirmed_value_conflicts(
++                cursor.get("commission"), commission)
++            identity_ok = (
++                cur_status in _SELL_JOURNAL_TERMINAL_STATUSES
++                and cur_status == report_status
++                and cur_confirmed == executed
++                and cur_applied == executed
++                and not price_conflict
++                and not commission_conflict
++            )
++            if not identity_ok:
++                pos.state = PositionState.UNCERTAIN
++                client.uncertain_state = True
++                logging.error(
++                    f"[reconcile] {ticker}: противоречивый терминальный отчёт "
++                    f"SELL {oid} (executed={executed}/{requested}, "
++                    f"status={report_status or 'нет'}, price={price}, "
++                    f"commission={commission}; cursor: "
++                    f"confirmed={cur_confirmed}, applied={cur_applied}, "
++                    f"status={cur_status or 'нет'}, "
++                    f"price={cursor.get('avg_exec_price')}, "
++                    f"commission={cursor.get('commission')}) — учёт НЕ закрыт "
++                    f"(fail-closed, позиция UNCERTAIN, повторная SELL запрещена)"
++                )
++                research_logger.log_event("SELL_CLOSE_REPORT_CONTRADICTION", {
++                    "figi": pos.figi, "ticker": ticker, "order_id": oid,
++                    "executed_lots": executed, "requested_lots": requested,
++                    "cursor_confirmed": cur_confirmed,
++                    "cursor_applied": cur_applied,
++                    "cursor_status": cur_status,
++                    "report_status": report_status,
++                    "cursor_avg_exec_price": cursor.get("avg_exec_price"),
++                    "report_price": price,
++                    "cursor_commission": cursor.get("commission"),
++                    "report_commission": commission,
++                    "price_conflict": price_conflict,
++                    "commission_conflict": commission_conflict,
++                })
++                return "uncertain"
++            logging.info(
++                f"[reconcile] {ticker}: повторный идентичный терминальный отчёт "
++                f"SELL {oid} (executed={executed}, status={report_status}, "
++                f"price={price}, commission={commission}) — исполнение уже "
++                f"учтено per-order cursor'ом, повторное списание не выполняется"
++            )
++        # --- Синхронизация записи реестра с фактическим отчётом (как в
++        # resolve_closing): терминальный статус + cumulative этой заявки;
++        # reason СОХРАНЯЕТСЯ (атрибуция close_reason CSV-строки). Сбой
++        # синхронизации НЕ отменяет брокерски подтверждённое закрытие учёта,
++        # но запись остаётся незавершённой — FIGI-блокировка сохраняется
++        # (безопасное деградированное состояние, без ложного снятия блокировок).
++        if ledger is not None and status:
++            try:
++                prev_rec = ledger.latest(oid)
++                prev_reason = str((prev_rec or {}).get("reason") or "")
++                ledger.record_status(
++                    oid, str(status),
++                    figi=pos.figi, ticker=pos.ticker, side=close_side,
++                    requested_lots=int(requested or 0),
++                    executed_lots=int(executed),
++                    avg_exec_price=price,
++                    reason=prev_reason or "статус SELL закрытия подтверждён брокером (В2, reconcile)",
++                    source="reconcile_b2",
++                )
++            except Exception as ledger_exc:
++                logging.error(
++                    f"[reconcile] {ticker}: синхронизация реестра для SELL "
++                    f"{oid} не удалась: {type(ledger_exc).__name__} — запись "
++                    f"осталась незавершённой, FIGI-блокировка сохранена "
++                    f"(учёт позиции закрыт по брокерскому отчёту)"
++                )
++        # --- Завершение учёта. Штатное применение могло: (а) закрыть позицию
++        # полностью (quantity=0, CLOSED — полный SELL 23/23); (б) оставить
++        # остаток (частичное исполнение: терминальный отчёт с executed <
++        # requested -> UNCERTAIN с quantity>0). Остаток отсутствует у брокера
++        # (достоверный снимок — предусловие ветки) — закрывается как ВНЕШНЕЕ
++        # закрытие остатка: без цены исполнения, без P&L, с явным отличием
++        # от исполнения собственной SELL в error_note. Уже учтённые лоты
++        # НЕ списываются повторно (per-order cursor).
++        remaining = int(pos.quantity)
++        try:
++            original_requested = int(cursor.get("requested_lots")
++                                     or requested or requested_lots or 0)
++        except (TypeError, ValueError):
++            original_requested = 0
++        # v2.3.4-stage2 (идемпотентность безопасного повтора): повтор НЕ
++        # понижает уже зафиксированную неполноту исполнения. При частичном
++        # исполнении первая обработка установила pos.partial=True и закрыла
++        # остаток внешне (quantity=0, CLOSED): на безопасном повторе
++        # remaining==0, и прежнее безусловное `pos.partial = remaining > 0`
++        # затирало частичный результат (CSV-статус FILL_PARTIAL -> FILL при
++        # записи после повтора). Повторный прогон доделывает финализацию
++        # только если она была прервана (позиция ещё не CLOSED с остатком).
++        if remaining > 0:
++            pos.partial = True
++            pos.quantity = 0
++            pos.state = PositionState.CLOSED
++        elif pos.state != PositionState.CLOSED:
++            pos.partial = False
++        pos.close_reason = close_reason
++        if not pos.close_requested_lots:
++            pos.close_requested_lots = original_requested or int(executed)
++        pos.close_requested_at = (rec.get("updated_at_utc")
++                                  or rec.get("timestamp_utc")
++                                  or pos.close_requested_at
++                                  or datetime.now(timezone.utc).isoformat())
++        if not pos.close_price_before_order:
++            # как в _finalize_position_closed: при неизвестной цене «перед
++            # заявкой» slippage не искажается артефактом нулевой точки
++            pos.close_price_before_order = price if price is not None else 0.0
+         note = "POSITION_CLOSED_BY_LEDGER"
+-        if not full:
+-            note += "; частичное исполнение SELL, остаток закрыт вне робота"
++        if remaining > 0:
++            note += (f"; частичное исполнение SELL ({executed}/{original_requested} лот.), "
++                     f"остаток {remaining} лот. закрыт вне робота — цена исполнения "
++                     f"остатка неизвестна, P&L остатка не рассчитан")
+         if price is None:
+             note += "; цена исполнения не получена — CSV без P&L (PRICE_UNKNOWN)"
+-        _finalize_position_closed(
+-            pos, sold_lots=sold, exit_price=price, close_reason=close_reason,
+-            order_id=oid,
+-            requested_at=rec.get("updated_at_utc") or rec.get("timestamp_utc"),
+-            note=note,
+-            # v2.3.1-stage1 (ТЗ-5): цена — из отчёта РЕАЛЬНОГО исполненного
+-            # SELL-ордера (реестр/брокер) — подтверждённая. Если цену получить
+-            # не удалось, маркер выставится False внутри _finalize_position_closed.
+-            price_confirmed=True,
+-        )
++        # v2.3.4-stage2 (идемпотентность безопасного повтора): повтор НЕ
++        # затирает error_note, сформированный первой обработкой (пометка
++        # частичного исполнения и т.п.) — CSV-строка не искажается.
++        if remaining > 0 or not getattr(pos, "error_note", None):
++            pos.error_note = note
+         logging.warning(
+-            f"[reconcile] {ticker}: позиция отсутствует у брокера, найдена своя "
+-            f"SELL-заявка {oid} ({executed} лот., price={price}) — учёт закрыт "
+-            f"({close_reason}), CSV-строка будет записана"
++            f"[reconcile] {ticker}: позиция отсутствует у брокера, своя SELL-заявка "
++            f"{oid} ({executed}/{original_requested or requested or '—'} лот., "
++            f"price={price}) — исполнение применено штатно "
++            f"(apply_close_execution), учёт закрыт ({close_reason}), "
++            f"CSV-строка будет записана"
+         )
+         research_logger.log_event("POSITION_CLOSED_BY_LEDGER", {
+             "figi": pos.figi, "ticker": ticker, "order_id": oid,
+             "executed_lots": executed, "requested_lots": requested,
+             "exit_price": price, "close_reason": close_reason,
+             "ledger_status": status,
++            "applied_via": "apply_close_execution",
++            "remaining_lots_closed_externally": remaining,
+         })
+         await notify(
+             f"ℹ️ <b>{ticker}</b>: позиция закрыта (подтверждено реестром заявок)\n"
+             f"SELL {oid}: {executed} лот. по {price if price else '—'}\n"
+             f"Причина: {close_reason}. Учёт закрыт, CSV будет записан."
++            + (f"\nОстаток {remaining} лот. закрыт вне робота (без P&L)."
++               if remaining > 0 else "")
+             + ("" if price else "\nЦена исполнения не получена — CSV-строка без P&L.")
+         )
+         return "ledger_close"
+@@ -1540,7 +1861,7 @@
+         # (достоверный снимок). Сначала пробуем разрешить по реестру заявок
+         # или двойному подтверждению — и только если не удалось, фиксируем
+         # расхождение (прежнее поведение).
+-        action = await _try_resolve_absent_position(client, ledger, pos)
++        action = await _try_resolve_absent_position(client, ledger, pos, monitor)
+         if action in ("ledger_close", "external_close"):
+             mutated = True
+             continue
+@@ -1553,9 +1874,9 @@
+             # client.uncertain_state=True + reconcile_done=False — новые
+             # входы блокированы до терминального статуса заявки.
+             mismatches.append(
+-                f"{figi}: SELL-заявка закрытия в нетерминальном статусе, "
+-                f"позиция отсутствует у брокера — учёт не закрывается "
+-                f"(ожидание терминального отчёта)"
++                f"{figi}: SELL-заявка закрытия не разрешена (нетерминальный "
++                f"статус или противоречивый отчёт), позиция отсутствует у "
++                f"брокера — учёт не закрывается (fail-closed)"
+             )
+             continue
+         if action == "candidate":

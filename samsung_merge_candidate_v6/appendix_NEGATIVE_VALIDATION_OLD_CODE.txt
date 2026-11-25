@@ -1,0 +1,1133 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0 -- /home/z/.venv/bin/python3
+metadata: {'Python': '3.12.16', 'Platform': 'Linux-5.10.134-013.15.kangaroo.al8.x86_64-x86_64-with-glibc2.41', 'Packages': {'pytest': '9.0.2', 'pluggy': '1.6.0'}, 'Plugins': {'Faker': '40.1.2', 'metadata': '3.1.1', 'asyncio': '1.3.0', 'ddtrace': '4.2.2', 'cov': '7.0.0', 'json-report': '1.5.0', 'anyio': '4.13.0'}}
+rootdir: /home/z
+configfile: pyproject.toml
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 16 items
+
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_a_reconcile_keeps_initial_request_timestamp FAILED [  6%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_b_missing_position_ts_restored_from_own_cursor FAILED [ 12%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_c_no_historical_ts_left_absent_legacy_policy FAILED [ 18%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_d_cross_trade_timestamp_isolated_and_fail_closed FAILED [ 25%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_e_new_cursor_missing_trade_id_fail_closed FAILED [ 31%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_f_new_cursor_missing_figi_fail_closed FAILED [ 37%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_g_new_cursor_missing_side_fail_closed FAILED [ 43%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_h_new_cursor_wrong_identity_fail_closed FAILED [ 50%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_i_valid_new_cursor_recovery_completes FAILED [ 56%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_j_valid_legacy_cursor_recovery_completes FAILED [ 62%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_k_legacy_cursor_contradiction_fail_closed FAILED [ 68%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_l_conflict_task_stays_blocked_after_restart FAILED [ 75%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_m_empty_close_reason_no_indexerror_fallback FAILED [ 81%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_n_empty_close_reason_keeps_known_reason FAILED [ 87%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_o_normal_close_reason_unchanged PASSED [ 93%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_p_empty_reason_reconcile_uncertain_no_side_effects FAILED [100%]
+
+=================================== FAILURES ===================================
+_____________ test_v6_a_reconcile_keeps_initial_request_timestamp ______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_a_reconcile_keeps_init0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d375fd0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f553d373830>
+
+    def test_v6_a_reconcile_keeps_initial_request_timestamp(isolated_paths, clock,
+                                                            monkeypatch):
+        """SELL отправлена в 09:05, ответ брокера потерян, первоначальное время
+        сохранено в close cursor; робот перезапускается; в 10:20 B2 reconcile
+        восстанавливает состояние заявки (updated_at_utc записи реестра = 10:20).
+        Итоговый close_requested_at ОСТАЁТСЯ 09:05; CSV exit_time = 09:05,
+        а не 10:20."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_open_position(monitor, "F1", "t-v6a")
+        pos.close_reason = "STOP_LOSS"
+    
+        # --- SELL при 09:05, ответ потерян; timestamp сохранён ДО отправки ---
+        lost = close_lost_response(clock, monitor, pos, T_0905, monkeypatch)
+        req_id = pos.close_order_request_id
+        assert pos.close_requested_at == T_0905
+        assert pos.close_orders[req_id]["requested_at"] == T_0905
+        assert lost.orders[0][3] == req_id
+    
+        # --- Перезапуск робота ---
+        monitor2 = restart(tmp_path, monitor)
+        pos_r = monitor2.positions["F1"]
+        assert pos_r.close_requested_at == T_0905
+    
+        # --- Реестр: INTENT 09:05, поздняя синхронизация статуса 10:20
+        #     (updated_at_utc = 10:20 — время ВОССТАНОВЛЕНИЯ, не запроса) ---
+        ledger = make_b2_ledger_case(
+            tmp_path, clock, pos_r, req_id, requested=LOTS,
+            reason="close:STOP_LOSS", intent_at=T_0905, late_status="NEW",
+            late_at=T_1020)
+        assert ledger.latest(req_id)["updated_at_utc"] == T_1020
+        assert ledger.latest(req_id)["created_at_utc"] == T_0905
+    
+        # --- B2 reconcile в 10:20 восстанавливает закрытие по отчёту ---
+        clock.set(T_1020)
+        client = FakeClient(order_state=terminal_report())
+        action = run(main._try_resolve_absent_position(client, ledger, pos_r, monitor2))
+        assert action == "ledger_close"
+        assert pos_r.state == PositionState.CLOSED
+    
+        # ГЛАВНОЕ: первоначальный timestamp НЕ перезаписан временем
+        # восстановления (10:20) и не временем запуска:
+>       assert pos_r.close_requested_at == T_0905, \
+            "close_requested_at = первоначальное время запроса SELL (неизменяемый факт)"
+E       AssertionError: close_requested_at = первоначальное время запроса SELL (неизменяемый факт)
+E       assert '2026-11-20T10:20:00+00:00' == '2026-11-20T09:05:00+00:00'
+E         
+E         - 2026-11-20T09:05:00+00:00
+E         ?             -  -
+E         + 2026-11-20T10:20:00+00:00
+E         ?            +  +
+
+test_b2_v6_timestamp_identity_close_reason.py:533: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 16:38:08,704 - ERROR - [close] TEST: state=None (order_request_id=203558d4-8a45-4a13-8265-8585e5e7c24f) — UNCERTAIN. Повторная отправка запрещена.
+2026-11-24 16:38:08,705 - INFO - [state] Загружено позиций: 1
+2026-11-24 16:38:08,706 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка 203558d4-8a45-4a13-8265-8585e5e7c24f (10/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (STOP_LOSS), CSV-строка будет записана
+2026-11-24 16:38:08,706 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL 203558d4-8a45-4a13-8265-8585e5e7c24f: 10 лот. по 110.0
+Причина: STOP_LOSS. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+ERROR    root:main.py:2163 [close] TEST: state=None (order_request_id=203558d4-8a45-4a13-8265-8585e5e7c24f) — UNCERTAIN. Повторная отправка запрещена.
+INFO     root:main.py:1226 [state] Загружено позиций: 1
+WARNING  root:main.py:1736 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка 203558d4-8a45-4a13-8265-8585e5e7c24f (10/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (STOP_LOSS), CSV-строка будет записана
+INFO     root:main.py:900 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL 203558d4-8a45-4a13-8265-8585e5e7c24f: 10 лот. по 110.0
+Причина: STOP_LOSS. Учёт закрыт, CSV будет записан.
+____________ test_v6_b_missing_position_ts_restored_from_own_cursor ____________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_b_missing_position_ts_0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d38a510>
+
+    def test_v6_b_missing_position_ts_restored_from_own_cursor(isolated_paths,
+                                                               clock):
+        """Легаси-позиция (старый state.json): close_requested_at отсутствует,
+        но СВОЙ per-order cursor содержит requested_at. При восстановлении
+        через B2 reconcile используется 09:05 (cursor), а НЕ updated_at_utc
+        реестра (10:20) и не время текущего запуска."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_open_position(monitor, "F1", "t-v6b")
+        # cursor создан с известным временем запроса; в позиции timestamp
+        # ОТСУТСТВУЕТ (старый state.json):
+        monitor.add_close_order(pos, "sell-b6", LOTS, requested_at=T_0905)
+        pos.close_order_request_id = "sell-b6"
+        pos.close_requested_lots = LOTS
+        pos.close_requested_at = None
+    
+        # --- Перезапуск: в state.json close_requested_at = null ---
+        monitor2 = restart(tmp_path, monitor)
+        pos_r = monitor2.positions["F1"]
+        assert not pos_r.close_requested_at
+        assert pos_r.close_orders["sell-b6"]["requested_at"] == T_0905
+    
+        # --- Реестр: поздняя синхронизация 10:20 ---
+        ledger = make_b2_ledger_case(
+            tmp_path, clock, pos_r, "sell-b6", requested=LOTS,
+            reason="close:STOP_LOSS", intent_at=T_0905, late_status="NEW",
+            late_at=T_1020)
+        assert ledger.latest("sell-b6")["updated_at_utc"] == T_1020
+    
+        # --- B2 reconcile в 10:20 ---
+        clock.set(T_1020)
+        client = FakeClient(order_state=terminal_report())
+        action = run(main._try_resolve_absent_position(client, ledger, pos_r, monitor2))
+        assert action == "ledger_close"
+        assert pos_r.state == PositionState.CLOSED
+    
+        # Использован timestamp СОБСТВЕННОГО cursor'а (09:05):
+>       assert pos_r.close_requested_at == T_0905
+E       AssertionError: assert '2026-11-20T10:20:00+00:00' == '2026-11-20T09:05:00+00:00'
+E         
+E         - 2026-11-20T09:05:00+00:00
+E         ?             -  -
+E         + 2026-11-20T10:20:00+00:00
+E         ?            +  +
+
+test_b2_v6_timestamp_identity_close_reason.py:593: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 16:38:08,758 - INFO - [state] Загружено позиций: 1
+2026-11-24 16:38:08,758 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-b6 (10/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (STOP_LOSS), CSV-строка будет записана
+2026-11-24 16:38:08,759 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-b6: 10 лот. по 110.0
+Причина: STOP_LOSS. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:1226 [state] Загружено позиций: 1
+WARNING  root:main.py:1736 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-b6 (10/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (STOP_LOSS), CSV-строка будет записана
+INFO     root:main.py:900 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-b6: 10 лот. по 110.0
+Причина: STOP_LOSS. Учёт закрыт, CSV будет записан.
+_____________ test_v6_c_no_historical_ts_left_absent_legacy_policy _____________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_c_no_historical_ts_lef0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d265f70>
+
+    def test_v6_c_no_historical_ts_left_absent_legacy_policy(isolated_paths,
+                                                             clock):
+        """Нет достоверного исторического времени (ни в позиции, ни в cursor).
+        После B2 reconcile close_requested_at ОСТАЁТСЯ None — никакой
+        timestamp от другой заявки не используется, datetime.now() внутрь
+        функции восстановления не подставляется. Явно обозначенная
+        legacy-политика проекта (момент записи строки CSV) применяется
+        ОТДЕЛЬНО — на записи trade_row."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_open_position(monitor, "F1", "t-v6c")
+        # cursor БЕЗ requested_at (старый формат/потеря), timestamp позиции
+        # отсутствует:
+        monitor.add_close_order(pos, "sell-c6", LOTS)
+        pos.close_order_request_id = "sell-c6"
+        pos.close_requested_lots = LOTS
+        pos.close_requested_at = None
+        assert pos.close_orders["sell-c6"]["requested_at"] is None
+    
+        # --- Реестр: INTENT 09:00, поздняя синхронизация 10:20 ---
+        ledger = make_b2_ledger_case(
+            tmp_path, clock, pos, "sell-c6", requested=LOTS,
+            reason="close:STOP_LOSS", intent_at=T_0900, late_status="NEW",
+            late_at=T_1020)
+        assert ledger.latest("sell-c6")["updated_at_utc"] == T_1020
+    
+        # --- B2 reconcile в 10:10 (время восстановления != 10:20 реестра) ---
+        clock.set(T_1010)
+        client = FakeClient(order_state=terminal_report())
+        action = run(main._try_resolve_absent_position(client, ledger, pos, monitor))
+        assert action == "ledger_close"
+        assert pos.state == PositionState.CLOSED
+    
+        # Исторического времени нет — оно НЕ выдумано внутрь восстановления:
+>       assert pos.close_requested_at is None, \
+            "без достоверного исторического времени close_requested_at остаётся None"
+E       AssertionError: без достоверного исторического времени close_requested_at остаётся None
+E       assert '2026-11-20T10:20:00+00:00' is None
+E        +  where '2026-11-20T10:20:00+00:00' = TrackedPosition(figi='F1', ticker='TEST', direction='BUY', entry_price=100.0, quantity=0, sl_price=98.0, tp_price=104.0, lot_size=1, state=<PositionState.CLOSED: 'CLOSED'>, close_reason='STOP_LOSS', close_order_id=None, close_requested_at='2026-11-20T10:20:00+00:00', close_price_before_order=100.0, executed_lots=10, execution_price=110.0, trade_id='t-v6c', signal_reason='', signal_time='', price_before_order=100.0, order_send_time='2026-11-20T09:00:00+00:00', partial=False, logged=False, actual_commission=1.5, entry_actual_commission=None, entry_order_id=None, entry_requested_lots=0, entry_applied_lots=0, entry_snapshot_synced=False, close_requested_lots=10, close_applied_lots=10, recovery_source=None, close_orders={'sell-c6': {'order_id': 'sell-c6', 'trade_id': 't-v6c', 'figi': 'F1', 'side': 'SELL', 'requested_lots': 10, 'confirmed_executed_lots': 10, 'applied_lots': 10, 'status': 'CANCELLED', 'requested_at': None, 'avg_exec_price': 110.0, 'commission': 1.5}}, close_applications=[{'order_id': 'sell-c6', 'from_applied_lots': 0, 'to_applied_lots': 10, 'delta_lots': 10}], initial_sl_price=0.0, initial_tp_price=0.0, mae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=True, close_order_request_id='sell-c6').close_requested_at
+
+test_b2_v6_timestamp_identity_close_reason.py:645: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 16:38:08,776 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-c6 (10/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (STOP_LOSS), CSV-строка будет записана
+2026-11-24 16:38:08,776 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-c6: 10 лот. по 110.0
+Причина: STOP_LOSS. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+WARNING  root:main.py:1736 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-c6 (10/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (STOP_LOSS), CSV-строка будет записана
+INFO     root:main.py:900 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-c6: 10 лот. по 110.0
+Причина: STOP_LOSS. Учёт закрыт, CSV будет записан.
+___________ test_v6_d_cross_trade_timestamp_isolated_and_fail_closed ___________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_d_cross_trade_timestam0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d26af60>
+
+    def test_v6_d_cross_trade_timestamp_isolated_and_fail_closed(isolated_paths,
+                                                                 clock):
+        """(a) У позиции ссылка на СВОЮ заявку sell-d1, но в close_orders лежит
+        только cursor ЧУЖОЙ сделки того же FIGI (sell-d2, другой trade_id,
+        requested_at=10:05) — timestamp чужой сделки НЕ используется.
+        (b) Recovery-задача сделки t-v6d2, в снимке которой cursor ДРУГОЙ
+        сделки того же FIGI (другой trade_id / другой close order ID) —
+        fail-closed: брокер не опрашивается, CSV (включая exit_time чужой
+        сделки) не изменяется, задача не завершается."""
+        tmp_path = isolated_paths
+    
+        # --- (a) timestamp другой сделки не используется ---
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_open_position(monitor, "F1", "t-v6d")
+        pos.close_order_request_id = "sell-d1"
+        pos.close_requested_lots = LOTS
+        pos.close_requested_at = None
+        foreign_cursor = {
+            "order_id": "sell-d2", "trade_id": "t-v6d-other", "figi": "F1",
+            "side": "SELL", "requested_lots": LOTS,
+            "confirmed_executed_lots": LOTS, "applied_lots": LOTS,
+            "status": "CANCELLED", "requested_at": T_1005,
+            "avg_exec_price": None, "commission": None,
+        }
+        pos.close_orders["sell-d2"] = foreign_cursor
+        # Прямая проверка: восстановление не берёт timestamp чужой заявки:
+>       assert main._restore_close_requested_at(pos, "sell-d1") is None
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'main' has no attribute '_restore_close_requested_at'
+
+test_b2_v6_timestamp_identity_close_reason.py:699: AttributeError
+______________ test_v6_e_new_cursor_missing_trade_id_fail_closed _______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_e_new_cursor_missing_t0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d269520>
+
+    def test_v6_e_new_cursor_missing_trade_id_fail_closed(isolated_paths, clock):
+        """Новый формат cursor'а без обязательного trade_id: проверка не
+        пропускает пустое обязательное поле (cursor_missing_trade_id),
+        брокер не опрашивается, CSV не изменяется, задача остаётся."""
+        tmp_path = isolated_paths
+        monitor, task = make_recovery_case(tmp_path, "t-v6e", "sell-e6")
+        snap_cursor = task["position"]["close_orders"]["sell-e6"]
+>       assert ExecutionMonitor._cursor_is_new_format(snap_cursor) is True
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_is_new_format'
+
+test_b2_v6_timestamp_identity_close_reason.py:756: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 16:38:08,817 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 16:38:08,817 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 16:38:08,818 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v6e с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 16:38:08,818 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2939 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:398 [execution] TEST: закрытая сделка trade_id=t-v6e с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:424 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+________________ test_v6_f_new_cursor_missing_figi_fail_closed _________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_f_new_cursor_missing_f0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d2687d0>
+
+    def test_v6_f_new_cursor_missing_figi_fail_closed(isolated_paths, clock):
+        """Новый формат cursor'а с ПУСТЫМ обязательным FIGI: молчаливого
+        пропуска нет (cursor_missing_figi), задача блокируется целиком."""
+        tmp_path = isolated_paths
+        monitor, task = make_recovery_case(tmp_path, "t-v6f", "sell-f6")
+        snap_cursor = task["position"]["close_orders"]["sell-f6"]
+        snap_cursor["figi"] = ""  # обязательное поле ПУСТОЕ
+>       assert ExecutionMonitor.validate_recovery_identity(task) == \
+            "cursor_missing_figi"
+E       AssertionError: assert None == 'cursor_missing_figi'
+E        +  where None = <function ExecutionMonitor.validate_recovery_identity at 0x7f5527980180>({'figi': 'F1', 'position': {'actual_commission': None, 'breakeven_moved': False, 'close_applications': [{'delta_lots': 10, 'from_applied_lots': 0, 'order_id': 'sell-f6', 'to_applied_lots': 10}], 'close_applied_lots': 10, ...}, 'reason': 'position_replaced_same_figi', 'ticker': 'TEST', ...})
+E        +    where <function ExecutionMonitor.validate_recovery_identity at 0x7f5527980180> = ExecutionMonitor.validate_recovery_identity
+
+test_b2_v6_timestamp_identity_close_reason.py:791: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 16:38:08,837 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 16:38:08,837 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 16:38:08,837 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v6f с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 16:38:08,837 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2939 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:398 [execution] TEST: закрытая сделка trade_id=t-v6f с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:424 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+________________ test_v6_g_new_cursor_missing_side_fail_closed _________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_g_new_cursor_missing_s0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d26b410>
+
+    def test_v6_g_new_cursor_missing_side_fail_closed(isolated_paths, clock):
+        """Новый формат cursor'а без обязательного side: конфликт
+        cursor_missing_side, восстановления нет."""
+        tmp_path = isolated_paths
+        monitor, task = make_recovery_case(tmp_path, "t-v6g", "sell-g6")
+        snap_cursor = task["position"]["close_orders"]["sell-g6"]
+        del snap_cursor["side"]  # обязательное поле ОТСУТСТВУЕТ
+>       assert ExecutionMonitor.validate_recovery_identity(task) == \
+            "cursor_missing_side"
+E       AssertionError: assert None == 'cursor_missing_side'
+E        +  where None = <function ExecutionMonitor.validate_recovery_identity at 0x7f5527980180>({'figi': 'F1', 'position': {'actual_commission': None, 'breakeven_moved': False, 'close_applications': [{'delta_lots': 10, 'from_applied_lots': 0, 'order_id': 'sell-g6', 'to_applied_lots': 10}], 'close_applied_lots': 10, ...}, 'reason': 'position_replaced_same_figi', 'ticker': 'TEST', ...})
+E        +    where <function ExecutionMonitor.validate_recovery_identity at 0x7f5527980180> = ExecutionMonitor.validate_recovery_identity
+
+test_b2_v6_timestamp_identity_close_reason.py:819: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 16:38:08,854 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 16:38:08,854 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 16:38:08,854 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v6g с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 16:38:08,854 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2939 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:398 [execution] TEST: закрытая сделка trade_id=t-v6g с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:424 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+_______________ test_v6_h_new_cursor_wrong_identity_fail_closed ________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_h_new_cursor_wrong_ide0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d26e5d0>
+
+    def test_v6_h_new_cursor_wrong_identity_fail_closed(isolated_paths, clock):
+        """Новый формат cursor'а с НЕПРАВИЛЬНЫМИ значениями обязательных
+        идентификаторов: каждое противоречие снимку распознаётся отдельно
+        (cursor_trade_id_mismatch / cursor_figi_mismatch /
+        cursor_side_mismatch / cursor_order_id_mismatch) — ни один
+        идентификатор не подменяет другой только потому, что все они строки."""
+        tmp_path = isolated_paths
+        monitor, task = make_recovery_case(tmp_path, "t-v6h", "sell-h6")
+        snap_cursor = task["position"]["close_orders"]["sell-h6"]
+    
+        def validated(mutations):
+            cur = copy.deepcopy(snap_cursor)
+            cur.update(mutations)
+            probe = copy.deepcopy(task)
+            probe["position"]["close_orders"]["sell-h6"] = cur
+            return ExecutionMonitor.validate_recovery_identity(probe)
+    
+        # Неправильный trade_id:
+        assert validated({"trade_id": "t-foreign"}) == "cursor_trade_id_mismatch"
+        # Неправильный FIGI:
+        assert validated({"figi": "F9"}) == "cursor_figi_mismatch"
+        # Неправильная сторона (BUY вместо SELL закрытия BUY-позиции):
+        assert validated({"side": "BUY"}) == "cursor_side_mismatch"
+        # Идентификатор собственной заявки не совпадает с ключом close_orders
+        # (клиентский UUID не подменяет биржевой ID и наоборот):
+>       assert validated({"order_id": "sell-FOREIGN"}) == "cursor_order_id_mismatch"
+E       AssertionError: assert None == 'cursor_order_id_mismatch'
+E        +  where None = <function test_v6_h_new_cursor_wrong_identity_fail_closed.<locals>.validated at 0x7f55274514e0>({'order_id': 'sell-FOREIGN'})
+
+test_b2_v6_timestamp_identity_close_reason.py:866: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 16:38:08,871 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 16:38:08,871 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 16:38:08,871 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v6h с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 16:38:08,871 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2939 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:398 [execution] TEST: закрытая сделка trade_id=t-v6h с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:424 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+________________ test_v6_i_valid_new_cursor_recovery_completes _________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_i_valid_new_cursor_rec0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d26d670>
+
+    def test_v6_i_valid_new_cursor_recovery_completes(isolated_paths, clock):
+        """Новый формат cursor'а с ПОЛНЫМ набором идентификаторов (trade_id,
+        FIGI, side, order_id, связь с close-заявкой): задача проходит
+        проверку (cursor_validation='full') и штатно восстанавливает CSV
+        (цена + фактическая комиссия), после чего завершается."""
+        tmp_path = isolated_paths
+        monitor, task = make_recovery_case(tmp_path, "t-v6i", "sell-i6")
+        snap_cursor = task["position"]["close_orders"]["sell-i6"]
+        # Новый формат: все обязательные идентификаторы на месте и согласованы:
+>       assert ExecutionMonitor._cursor_is_new_format(snap_cursor) is True
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_is_new_format'
+
+test_b2_v6_timestamp_identity_close_reason.py:902: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 16:38:08,888 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 16:38:08,888 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 16:38:08,889 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v6i с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 16:38:08,889 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2939 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:398 [execution] TEST: закрытая сделка trade_id=t-v6i с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:424 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+_______________ test_v6_j_valid_legacy_cursor_recovery_completes _______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_j_valid_legacy_cursor_0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d26eb10>
+
+    def test_v6_j_valid_legacy_cursor_recovery_completes(isolated_paths, clock):
+        """Legacy cursor (старый state.json, без маркера identity_version) со
+        всеми ДОСТУПНЫМИ и согласованными идентификаторами: противоречия нет —
+        восстановление идёт штатно, но режим проверки явно помечается как
+        ОГРАНИЧЕННЫЙ (cursor_validation='legacy_limited'), а не выдаётся за
+        полную проверку."""
+        tmp_path = isolated_paths
+        monitor, task = make_recovery_case(tmp_path, "t-v6j", "sell-j6")
+        snap_cursor = task["position"]["close_orders"]["sell-j6"]
+        # Старая запись: маркера нового формата нет, остальные идентификаторы
+        # доступны и согласованы:
+>       del snap_cursor["identity_version"]
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'identity_version'
+
+test_b2_v6_timestamp_identity_close_reason.py:945: KeyError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 16:38:08,908 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 16:38:08,908 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 16:38:08,908 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v6j с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 16:38:08,908 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2939 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:398 [execution] TEST: закрытая сделка trade_id=t-v6j с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:424 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+______________ test_v6_k_legacy_cursor_contradiction_fail_closed _______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_k_legacy_cursor_contra0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d27bef0>
+
+    def test_v6_k_legacy_cursor_contradiction_fail_closed(isolated_paths, clock):
+        """Legacy-политика проверяет ВСЕ доступные идентификаторы: противоречие
+        снимку в legacy cursor'е (чужой FIGI или order_id, не совпадающий с
+        ключом close_orders) — fail-closed, как и в новом формате."""
+        tmp_path = isolated_paths
+        # --- вариант 1: противоречащий FIGI ---
+        monitor, task = make_recovery_case(tmp_path, "t-v6k", "sell-k6")
+        snap_cursor = task["position"]["close_orders"]["sell-k6"]
+>       del snap_cursor["identity_version"]  # legacy
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'identity_version'
+
+test_b2_v6_timestamp_identity_close_reason.py:984: KeyError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 16:38:08,925 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 16:38:08,925 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 16:38:08,925 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v6k с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 16:38:08,925 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2939 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:398 [execution] TEST: закрытая сделка trade_id=t-v6k с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:424 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+_____________ test_v6_l_conflict_task_stays_blocked_after_restart ______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_l_conflict_task_stays_0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d279bb0>
+
+    def test_v6_l_conflict_task_stays_blocked_after_restart(isolated_paths, clock):
+        """Задача, заблокированная при импорте (новый cursor без trade_id),
+        переживает повторный перезапуск с тем же маркером конфликта: не
+        разблокируется повторной проверкой, не опрашивает брокера, не
+        изменяет CSV, не завершается."""
+        tmp_path = isolated_paths
+        monitor, task = make_recovery_case(tmp_path, "t-v6l", "sell-l6")
+        del task["position"]["close_orders"]["sell-l6"]["trade_id"]
+    
+        # --- первый перезапуск: конфликт зафиксирован ---
+        monitor2 = restart(tmp_path, monitor)
+        assert len(monitor2.pending_csv_recoveries) == 1
+>       assert monitor2.pending_csv_recoveries[0].get("conflict") == \
+            "cursor_missing_trade_id"
+E       AssertionError: assert None == 'cursor_missing_trade_id'
+E        +  where None = <built-in method get of dict object at 0x7f5527974ac0>('conflict')
+E        +    where <built-in method get of dict object at 0x7f5527974ac0> = {'figi': 'F1', 'position': {'actual_commission': None, 'breakeven_moved': False, 'close_applications': [{'delta_lots': 10, 'from_applied_lots': 0, 'order_id': 'sell-l6', 'to_applied_lots': 10}], 'close_applied_lots': 10, ...}, 'reason': 'position_replaced_same_figi', 'ticker': 'TEST', ...}.get
+
+test_b2_v6_timestamp_identity_close_reason.py:1027: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 16:38:08,941 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 16:38:08,941 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 16:38:08,942 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v6l с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 16:38:08,942 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+2026-11-24 16:38:08,942 - WARNING - [execution] import_state: восстановлено незавершённых recovery-задач CSV: 1
+2026-11-24 16:38:08,942 - INFO - [state] Загружено позиций: 1
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2939 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:398 [execution] TEST: закрытая сделка trade_id=t-v6l с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:424 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+WARNING  root:execution.py:1439 [execution] import_state: восстановлено незавершённых recovery-задач CSV: 1
+INFO     root:main.py:1226 [state] Загружено позиций: 1
+_____________ test_v6_m_empty_close_reason_no_indexerror_fallback ______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_m_empty_close_reason_n0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d2789b0>
+
+    def test_v6_m_empty_close_reason_no_indexerror_fallback(isolated_paths, clock):
+        """ПУСТАЯ причина в реестре ("close:") при неизвестной прежней причине
+        (pos.close_reason=None): никакого IndexError, разрешение В2 завершается
+        штатно, применяется существующий безопасный fallback проекта
+        ("LEDGER_CLOSE") — новый тип закрытия не придумывается."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_open_position(monitor, "F1", "t-v6m")
+        pos.state = PositionState.UNCERTAIN  # достижимый путь: UNCERTAIN-позиция
+        pos.close_reason = None              # причина неизвестна
+        monitor.add_close_order(pos, "sell-m6", LOTS)
+        pos.close_order_request_id = "sell-m6"
+        pos.close_requested_lots = LOTS
+        pos.close_requested_at = None
+    
+        ledger = make_b2_ledger_case(
+            tmp_path, clock, pos, "sell-m6", requested=LOTS,
+            reason="close:", intent_at=T_0905, late_status="NEW",
+            late_at=T_1020)
+    
+        clock.set(T_1020)
+        client = FakeClient(order_state=terminal_report())
+        # До v6 здесь было IndexError: list index out of range:
+>       action = run(main._try_resolve_absent_position(client, ledger, pos, monitor))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_b2_v6_timestamp_identity_close_reason.py:1083: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+test_b2_v6_timestamp_identity_close_reason.py:282: in run
+    return asyncio.run(coro)
+           ^^^^^^^^^^^^^^^^^
+/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason.FakeClient object at 0x7f553d27b980>
+ledger = <order_ledger.OrderLedger object at 0x7f553d27aa20>
+pos = TrackedPosition(figi='F1', ticker='TEST', direction='BUY', entry_price=100.0, quantity=10, sl_price=98.0, tp_price=104...0.0, mae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=False, close_order_request_id='sell-m6')
+monitor = <execution.ExecutionMonitor object at 0x7f553d27b3e0>
+
+    async def _try_resolve_absent_position(client: TinkoffClient,
+                                           ledger: Optional[OrderLedger], pos,
+                                           monitor: Optional[ExecutionMonitor] = None) -> str:
+        """Пакет В2/В3 для ветки reconcile «активная позиция локально,
+        у брокера отсутствует» (достоверный снимок).
+    
+        v2.3.4-stage1: monitor (опционально) — ExecutionMonitor, чей штатный
+        per-order механизм apply_close_execution() применяется в В2; при
+        отсутствии используется monitor_ref (production) или изолированный
+        экземпляр (методы только мутируют pos, общего состояния не требуют).
+    
+        Возвращает:
+          "ledger_close"   — учёт закрыт по СВОЕЙ SELL-заявке (В2);
+          "external_close" — учёт закрыт как внешнее (ручное) закрытие после
+                             двойного подтверждения (В3);
+          "candidate"      — первое обнаружение: учёт НЕ менялся, подтверждение
+                             — на следующей сверке;
+          "uncertain"      — v2.3.2-stage1 (Дефект-1): своя SELL-заявка закрытия
+                             существует, но её статус НЕТЕРМИНАЛЬНЫЙ
+                             (NEW/PARTIALLYFILL/неизвестен) — окончательное
+                             исполнение не доказано, учёт НЕ закрывается;
+          "mismatch"       — разрешить не удалось: прежнее поведение
+                             (RECONCILE_MISMATCH + блокировка новых входов).
+        """
+        ticker = pos.ticker
+        close_side = "SELL" if pos.direction == "BUY" else "BUY"
+        # --- В2: своя SELL-заявка закрытия ---
+        for rec in _match_own_close_sell(ledger, pos):
+            oid = str(rec.get("order_id") or "")
+            if not oid:
+                continue
+            try:
+                executed = int(rec.get("executed_lots") or 0)
+                requested = int(rec.get("requested_lots") or 0)
+            except (TypeError, ValueError):
+                executed, requested = 0, 0
+            status = rec.get("status")
+            price = None
+            commission = None  # фактическая комиссия — из записи реестра или отчёта брокера
+            rec_price = rec.get("avg_exec_price")
+            if rec_price is not None:
+                try:
+                    p = float(rec_price)
+                    price = p if p > 0 else None
+                except (TypeError, ValueError):
+                    price = None
+            # v2.3.4-stage2 (Дефект-1: потеря фактической комиссии). Комиссия,
+            # УЖЕ достоверно сохранённая в записи реестра (если хранится),
+            # используется как есть; расчётная (модельная) комиссия не
+            # подставляется никогда.
+            rec_commission = rec.get("commission")
+            if rec_commission is not None:
+                try:
+                    c = float(rec_commission)
+                    commission = c if c > 0 else None
+                except (TypeError, ValueError):
+                    commission = None
+            # Уточняем статус/исполнение/цену у брокера, если запись неполная.
+            # v2.3.4-stage2 (Дефект-1): НЕИЗВЕСТНАЯ комиссия — самостоятельное
+            # основание для запроса отчёта брокера. Отсутствие необходимости
+            # повторно запрашивать ЦЕНУ (запись уже содержит терминальный
+            # статус, executed_lots и avg_exec_price) не отменяет получения
+            # фактической комиссии — раньше при полной записи опрос не
+            # выполнялся и apply_close_execution получал commission=None,
+            # хотя фактическая комиссия доступна в брокерском отчёте.
+            # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи реестра.
+            if (executed <= 0 or status not in _TERMINAL_ORDER_STATUSES
+                    or price is None or commission is None):
+                state = await _poll_ledger_order_state(client, rec)
+                if state is not None:
+                    status = _status_name(getattr(state, "execution_report_status", None)) or status
+                    broker_le = int(getattr(state, "lots_executed", 0) or 0)
+                    if broker_le > 0:
+                        executed = broker_le
+                    info = await client.get_instrument_info(pos.figi)
+                    lot = int(info.get("lot")) if info and info.get("lot") else (pos.lot_size or 1)
+                    p = ExecutionMonitor._extract_price(state, executed, lot)
+                    if p:
+                        price = p
+                    # v2.3.4: фактическая комиссия брокера сохраняется (если
+                    # доступна) и попадает в штатное применение исполнения.
+                    # v2.3.4-stage2 (Дефект-1): уже сохранённая достоверная
+                    # комиссия НЕ перезаписывается — в том числе отсутствующим
+                    # значением отчёта; при недоступном отчёте комиссия не
+                    # выдумывается (остаётся None — CSV/учёт без комиссии).
+                    broker_commission = ExecutionMonitor._extract_commission(state)
+                    if commission is None:
+                        commission = broker_commission
+            if executed <= 0:
+                continue  # эта заявка не доказывает исполнение — следующий кандидат
+            # v2.3.2-stage1 (Дефект-1: нетерминальная SELL-заявка). После
+            # уточнения у брокера статус может остаться НЕТЕРМИНАЛЬНЫМ
+            # (NEW / PARTIALLYFILL / UNCERTAIN / UNKNOWN / None) — в том числе
+            # при executed_lots > 0 (частичное исполнение живой заявки, кейс
+            # «SELL 10 лот., исполнено 3, статус PARTIALLYFILL»). Исполнение
+            # такой заявки НЕ окончательно: возможны дополнительные лоты,
+            # отмена или отказ брокера. Раньше учёт закрывался сразу
+            # (LEDGER_CLOSE по частично исполненной живой SELL) — дефект.
+            # Теперь:
+            #   - локальный учёт НЕ закрывается (никакого финального закрытия
+            #     по нетерминальному статусу);
+            #   - повторная отправка SELL не выполняется (заявка уже зарегистрирована;
+            #     SL/TP для UNCERTAIN не действуют — новых close-заявок нет);
+            #   - позиция переводится в UNCERTAIN, новые входы блокируются
+            #     (mismatch-путь в reconcile);
+            #   - разрешение — ТОЛЬКО терминальный отчёт этой SELL-заявки:
+            #     следующий вызов В2 закроет учёт с подтверждённой ценой
+            #     (FILL/CANCELLED/EXPIRED с executed_lots>0) или вернёт позицию
+            #     в штатное русло (REJECTED/CANCELLED без исполнения -> В3).
+            if status not in _TERMINAL_ORDER_STATUSES:
+                pos.state = PositionState.UNCERTAIN
+                client.uncertain_state = True
+                logging.error(
+                    f"[reconcile] {ticker}: SELL-заявка закрытия {oid} НЕТЕРМИНАЛЬНА "
+                    f"(status={status}, executed={executed}/{requested}), позиция "
+                    f"отсутствует у брокера — окончательное исполнение не доказано: "
+                    f"учёт НЕ закрыт, позиция UNCERTAIN, повторная SELL запрещена"
+                )
+                research_logger.log_event("SELL_NON_TERMINAL_CLOSE_BLOCKED", {
+                    "figi": pos.figi, "ticker": ticker, "order_id": oid,
+                    "status": status, "executed_lots": executed,
+                    "requested_lots": requested, "quantity": pos.quantity,
+                })
+                await notify(
+                    f"⚠️ <b>{ticker}</b>: позиция отсутствует у брокера, но SELL-заявка "
+                    f"закрытия ещё НЕ завершена ({status}, исполнено {executed}/{requested}).\n"
+                    f"Окончательное исполнение не доказано — учёт НЕ закрыт (UNCERTAIN), "
+                    f"новые входы заблокированы до терминального статуса заявки."
+                )
+                return "uncertain"
+            reason_text = str(rec.get("reason") or "")
+            close_reason = "LEDGER_CLOSE"
+            if reason_text.startswith("close:"):
+>               close_reason = reason_text[len("close:"):].split()[0].upper() or close_reason
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               IndexError: list index out of range
+
+main.py:1536: IndexError
+_______________ test_v6_n_empty_close_reason_keeps_known_reason ________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_n_empty_close_reason_k0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f553d268ad0>
+
+    def test_v6_n_empty_close_reason_keeps_known_reason(isolated_paths, clock):
+        """ПУСТАЯ причина в реестре ("close:") при ИЗВЕСТНОЙ прежней причине
+        позиции (STOP_LOSS): прежняя причина сохраняется, не заменяется на
+        fallback и не придумывается заново."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_open_position(monitor, "F1", "t-v6n")
+        pos.state = PositionState.UNCERTAIN
+        pos.close_reason = "STOP_LOSS"  # прежняя причина известна
+        monitor.add_close_order(pos, "sell-n6", LOTS)
+        pos.close_order_request_id = "sell-n6"
+        pos.close_requested_lots = LOTS
+        pos.close_requested_at = None
+    
+        ledger = make_b2_ledger_case(
+            tmp_path, clock, pos, "sell-n6", requested=LOTS,
+            reason="close:", intent_at=T_0905, late_status="NEW",
+            late_at=T_1020)
+    
+        clock.set(T_1020)
+        client = FakeClient(order_state=terminal_report())
+>       action = run(main._try_resolve_absent_position(client, ledger, pos, monitor))
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_b2_v6_timestamp_identity_close_reason.py:1121: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+test_b2_v6_timestamp_identity_close_reason.py:282: in run
+    return asyncio.run(coro)
+           ^^^^^^^^^^^^^^^^^
+/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason.FakeClient object at 0x7f553d2802c0>
+ledger = <order_ledger.OrderLedger object at 0x7f553d269d60>
+pos = TrackedPosition(figi='F1', ticker='TEST', direction='BUY', entry_price=100.0, quantity=10, sl_price=98.0, tp_price=104...0.0, mae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=False, close_order_request_id='sell-n6')
+monitor = <execution.ExecutionMonitor object at 0x7f553d26a960>
+
+    async def _try_resolve_absent_position(client: TinkoffClient,
+                                           ledger: Optional[OrderLedger], pos,
+                                           monitor: Optional[ExecutionMonitor] = None) -> str:
+        """Пакет В2/В3 для ветки reconcile «активная позиция локально,
+        у брокера отсутствует» (достоверный снимок).
+    
+        v2.3.4-stage1: monitor (опционально) — ExecutionMonitor, чей штатный
+        per-order механизм apply_close_execution() применяется в В2; при
+        отсутствии используется monitor_ref (production) или изолированный
+        экземпляр (методы только мутируют pos, общего состояния не требуют).
+    
+        Возвращает:
+          "ledger_close"   — учёт закрыт по СВОЕЙ SELL-заявке (В2);
+          "external_close" — учёт закрыт как внешнее (ручное) закрытие после
+                             двойного подтверждения (В3);
+          "candidate"      — первое обнаружение: учёт НЕ менялся, подтверждение
+                             — на следующей сверке;
+          "uncertain"      — v2.3.2-stage1 (Дефект-1): своя SELL-заявка закрытия
+                             существует, но её статус НЕТЕРМИНАЛЬНЫЙ
+                             (NEW/PARTIALLYFILL/неизвестен) — окончательное
+                             исполнение не доказано, учёт НЕ закрывается;
+          "mismatch"       — разрешить не удалось: прежнее поведение
+                             (RECONCILE_MISMATCH + блокировка новых входов).
+        """
+        ticker = pos.ticker
+        close_side = "SELL" if pos.direction == "BUY" else "BUY"
+        # --- В2: своя SELL-заявка закрытия ---
+        for rec in _match_own_close_sell(ledger, pos):
+            oid = str(rec.get("order_id") or "")
+            if not oid:
+                continue
+            try:
+                executed = int(rec.get("executed_lots") or 0)
+                requested = int(rec.get("requested_lots") or 0)
+            except (TypeError, ValueError):
+                executed, requested = 0, 0
+            status = rec.get("status")
+            price = None
+            commission = None  # фактическая комиссия — из записи реестра или отчёта брокера
+            rec_price = rec.get("avg_exec_price")
+            if rec_price is not None:
+                try:
+                    p = float(rec_price)
+                    price = p if p > 0 else None
+                except (TypeError, ValueError):
+                    price = None
+            # v2.3.4-stage2 (Дефект-1: потеря фактической комиссии). Комиссия,
+            # УЖЕ достоверно сохранённая в записи реестра (если хранится),
+            # используется как есть; расчётная (модельная) комиссия не
+            # подставляется никогда.
+            rec_commission = rec.get("commission")
+            if rec_commission is not None:
+                try:
+                    c = float(rec_commission)
+                    commission = c if c > 0 else None
+                except (TypeError, ValueError):
+                    commission = None
+            # Уточняем статус/исполнение/цену у брокера, если запись неполная.
+            # v2.3.4-stage2 (Дефект-1): НЕИЗВЕСТНАЯ комиссия — самостоятельное
+            # основание для запроса отчёта брокера. Отсутствие необходимости
+            # повторно запрашивать ЦЕНУ (запись уже содержит терминальный
+            # статус, executed_lots и avg_exec_price) не отменяет получения
+            # фактической комиссии — раньше при полной записи опрос не
+            # выполнялся и apply_close_execution получал commission=None,
+            # хотя фактическая комиссия доступна в брокерском отчёте.
+            # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи реестра.
+            if (executed <= 0 or status not in _TERMINAL_ORDER_STATUSES
+                    or price is None or commission is None):
+                state = await _poll_ledger_order_state(client, rec)
+                if state is not None:
+                    status = _status_name(getattr(state, "execution_report_status", None)) or status
+                    broker_le = int(getattr(state, "lots_executed", 0) or 0)
+                    if broker_le > 0:
+                        executed = broker_le
+                    info = await client.get_instrument_info(pos.figi)
+                    lot = int(info.get("lot")) if info and info.get("lot") else (pos.lot_size or 1)
+                    p = ExecutionMonitor._extract_price(state, executed, lot)
+                    if p:
+                        price = p
+                    # v2.3.4: фактическая комиссия брокера сохраняется (если
+                    # доступна) и попадает в штатное применение исполнения.
+                    # v2.3.4-stage2 (Дефект-1): уже сохранённая достоверная
+                    # комиссия НЕ перезаписывается — в том числе отсутствующим
+                    # значением отчёта; при недоступном отчёте комиссия не
+                    # выдумывается (остаётся None — CSV/учёт без комиссии).
+                    broker_commission = ExecutionMonitor._extract_commission(state)
+                    if commission is None:
+                        commission = broker_commission
+            if executed <= 0:
+                continue  # эта заявка не доказывает исполнение — следующий кандидат
+            # v2.3.2-stage1 (Дефект-1: нетерминальная SELL-заявка). После
+            # уточнения у брокера статус может остаться НЕТЕРМИНАЛЬНЫМ
+            # (NEW / PARTIALLYFILL / UNCERTAIN / UNKNOWN / None) — в том числе
+            # при executed_lots > 0 (частичное исполнение живой заявки, кейс
+            # «SELL 10 лот., исполнено 3, статус PARTIALLYFILL»). Исполнение
+            # такой заявки НЕ окончательно: возможны дополнительные лоты,
+            # отмена или отказ брокера. Раньше учёт закрывался сразу
+            # (LEDGER_CLOSE по частично исполненной живой SELL) — дефект.
+            # Теперь:
+            #   - локальный учёт НЕ закрывается (никакого финального закрытия
+            #     по нетерминальному статусу);
+            #   - повторная отправка SELL не выполняется (заявка уже зарегистрирована;
+            #     SL/TP для UNCERTAIN не действуют — новых close-заявок нет);
+            #   - позиция переводится в UNCERTAIN, новые входы блокируются
+            #     (mismatch-путь в reconcile);
+            #   - разрешение — ТОЛЬКО терминальный отчёт этой SELL-заявки:
+            #     следующий вызов В2 закроет учёт с подтверждённой ценой
+            #     (FILL/CANCELLED/EXPIRED с executed_lots>0) или вернёт позицию
+            #     в штатное русло (REJECTED/CANCELLED без исполнения -> В3).
+            if status not in _TERMINAL_ORDER_STATUSES:
+                pos.state = PositionState.UNCERTAIN
+                client.uncertain_state = True
+                logging.error(
+                    f"[reconcile] {ticker}: SELL-заявка закрытия {oid} НЕТЕРМИНАЛЬНА "
+                    f"(status={status}, executed={executed}/{requested}), позиция "
+                    f"отсутствует у брокера — окончательное исполнение не доказано: "
+                    f"учёт НЕ закрыт, позиция UNCERTAIN, повторная SELL запрещена"
+                )
+                research_logger.log_event("SELL_NON_TERMINAL_CLOSE_BLOCKED", {
+                    "figi": pos.figi, "ticker": ticker, "order_id": oid,
+                    "status": status, "executed_lots": executed,
+                    "requested_lots": requested, "quantity": pos.quantity,
+                })
+                await notify(
+                    f"⚠️ <b>{ticker}</b>: позиция отсутствует у брокера, но SELL-заявка "
+                    f"закрытия ещё НЕ завершена ({status}, исполнено {executed}/{requested}).\n"
+                    f"Окончательное исполнение не доказано — учёт НЕ закрыт (UNCERTAIN), "
+                    f"новые входы заблокированы до терминального статуса заявки."
+                )
+                return "uncertain"
+            reason_text = str(rec.get("reason") or "")
+            close_reason = "LEDGER_CLOSE"
+            if reason_text.startswith("close:"):
+>               close_reason = reason_text[len("close:"):].split()[0].upper() or close_reason
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               IndexError: list index out of range
+
+main.py:1536: IndexError
+__________ test_v6_p_empty_reason_reconcile_uncertain_no_side_effects __________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_v6_p_empty_reason_reconci0')
+clock = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason._Clock object at 0x7f55284e5970>
+
+    def test_v6_p_empty_reason_reconcile_uncertain_no_side_effects(isolated_paths,
+                                                                   clock):
+        """Полный reconcile: UNCERTAIN-позиция, отсутствующая у брокера, со
+        СВОЕЙ close-заявкой и ПУСТОЙ причиной ("close:"). Сценарий завершается
+        без исключения: закрытие по терминальному отчёту СВОЕЙ заявки через
+        штатный per-order механизм, CSV записан один раз; побочных торговых
+        действий нет (заявки не отправляются и не отменяются, чужие заявки
+        не опрашиваются)."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_open_position(monitor, "F1", "t-v6p")
+        pos.state = PositionState.UNCERTAIN
+        pos.close_reason = None
+        monitor.add_close_order(pos, "sell-p6", LOTS)
+        pos.close_order_request_id = "sell-p6"
+        pos.close_requested_lots = LOTS
+        pos.close_requested_at = None
+    
+        ledger = make_b2_ledger_case(
+            tmp_path, clock, pos, "sell-p6", requested=LOTS,
+            reason="close:", intent_at=T_0905, late_status="NEW",
+            late_at=T_1020)
+    
+        clock.set(T_1020)
+        client = FakeClient(order_state=terminal_report())
+        # Полный reconcile (внутри вызывается _try_resolve_absent_position):
+>       run(main.reconcile(client, monitor, ledger, None))
+
+test_b2_v6_timestamp_identity_close_reason.py:1196: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+test_b2_v6_timestamp_identity_close_reason.py:282: in run
+    return asyncio.run(coro)
+           ^^^^^^^^^^^^^^^^^
+/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/z/.local/share/uv/python/cpython-3.12.16-linux-x86_64-gnu/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+main.py:1981: in reconcile
+    action = await _try_resolve_absent_position(client, ledger, pos, monitor)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <env_negative_v5.test_b2_v6_timestamp_identity_close_reason.FakeClient object at 0x7f55284e6060>
+ledger = <order_ledger.OrderLedger object at 0x7f55284e4d70>
+pos = TrackedPosition(figi='F1', ticker='TEST', direction='BUY', entry_price=100.0, quantity=10, sl_price=98.0, tp_price=104...0.0, mae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=False, close_order_request_id='sell-p6')
+monitor = <execution.ExecutionMonitor object at 0x7f55284e5220>
+
+    async def _try_resolve_absent_position(client: TinkoffClient,
+                                           ledger: Optional[OrderLedger], pos,
+                                           monitor: Optional[ExecutionMonitor] = None) -> str:
+        """Пакет В2/В3 для ветки reconcile «активная позиция локально,
+        у брокера отсутствует» (достоверный снимок).
+    
+        v2.3.4-stage1: monitor (опционально) — ExecutionMonitor, чей штатный
+        per-order механизм apply_close_execution() применяется в В2; при
+        отсутствии используется monitor_ref (production) или изолированный
+        экземпляр (методы только мутируют pos, общего состояния не требуют).
+    
+        Возвращает:
+          "ledger_close"   — учёт закрыт по СВОЕЙ SELL-заявке (В2);
+          "external_close" — учёт закрыт как внешнее (ручное) закрытие после
+                             двойного подтверждения (В3);
+          "candidate"      — первое обнаружение: учёт НЕ менялся, подтверждение
+                             — на следующей сверке;
+          "uncertain"      — v2.3.2-stage1 (Дефект-1): своя SELL-заявка закрытия
+                             существует, но её статус НЕТЕРМИНАЛЬНЫЙ
+                             (NEW/PARTIALLYFILL/неизвестен) — окончательное
+                             исполнение не доказано, учёт НЕ закрывается;
+          "mismatch"       — разрешить не удалось: прежнее поведение
+                             (RECONCILE_MISMATCH + блокировка новых входов).
+        """
+        ticker = pos.ticker
+        close_side = "SELL" if pos.direction == "BUY" else "BUY"
+        # --- В2: своя SELL-заявка закрытия ---
+        for rec in _match_own_close_sell(ledger, pos):
+            oid = str(rec.get("order_id") or "")
+            if not oid:
+                continue
+            try:
+                executed = int(rec.get("executed_lots") or 0)
+                requested = int(rec.get("requested_lots") or 0)
+            except (TypeError, ValueError):
+                executed, requested = 0, 0
+            status = rec.get("status")
+            price = None
+            commission = None  # фактическая комиссия — из записи реестра или отчёта брокера
+            rec_price = rec.get("avg_exec_price")
+            if rec_price is not None:
+                try:
+                    p = float(rec_price)
+                    price = p if p > 0 else None
+                except (TypeError, ValueError):
+                    price = None
+            # v2.3.4-stage2 (Дефект-1: потеря фактической комиссии). Комиссия,
+            # УЖЕ достоверно сохранённая в записи реестра (если хранится),
+            # используется как есть; расчётная (модельная) комиссия не
+            # подставляется никогда.
+            rec_commission = rec.get("commission")
+            if rec_commission is not None:
+                try:
+                    c = float(rec_commission)
+                    commission = c if c > 0 else None
+                except (TypeError, ValueError):
+                    commission = None
+            # Уточняем статус/исполнение/цену у брокера, если запись неполная.
+            # v2.3.4-stage2 (Дефект-1): НЕИЗВЕСТНАЯ комиссия — самостоятельное
+            # основание для запроса отчёта брокера. Отсутствие необходимости
+            # повторно запрашивать ЦЕНУ (запись уже содержит терминальный
+            # статус, executed_lots и avg_exec_price) не отменяет получения
+            # фактической комиссии — раньше при полной записи опрос не
+            # выполнялся и apply_close_execution получал commission=None,
+            # хотя фактическая комиссия доступна в брокерском отчёте.
+            # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи реестра.
+            if (executed <= 0 or status not in _TERMINAL_ORDER_STATUSES
+                    or price is None or commission is None):
+                state = await _poll_ledger_order_state(client, rec)
+                if state is not None:
+                    status = _status_name(getattr(state, "execution_report_status", None)) or status
+                    broker_le = int(getattr(state, "lots_executed", 0) or 0)
+                    if broker_le > 0:
+                        executed = broker_le
+                    info = await client.get_instrument_info(pos.figi)
+                    lot = int(info.get("lot")) if info and info.get("lot") else (pos.lot_size or 1)
+                    p = ExecutionMonitor._extract_price(state, executed, lot)
+                    if p:
+                        price = p
+                    # v2.3.4: фактическая комиссия брокера сохраняется (если
+                    # доступна) и попадает в штатное применение исполнения.
+                    # v2.3.4-stage2 (Дефект-1): уже сохранённая достоверная
+                    # комиссия НЕ перезаписывается — в том числе отсутствующим
+                    # значением отчёта; при недоступном отчёте комиссия не
+                    # выдумывается (остаётся None — CSV/учёт без комиссии).
+                    broker_commission = ExecutionMonitor._extract_commission(state)
+                    if commission is None:
+                        commission = broker_commission
+            if executed <= 0:
+                continue  # эта заявка не доказывает исполнение — следующий кандидат
+            # v2.3.2-stage1 (Дефект-1: нетерминальная SELL-заявка). После
+            # уточнения у брокера статус может остаться НЕТЕРМИНАЛЬНЫМ
+            # (NEW / PARTIALLYFILL / UNCERTAIN / UNKNOWN / None) — в том числе
+            # при executed_lots > 0 (частичное исполнение живой заявки, кейс
+            # «SELL 10 лот., исполнено 3, статус PARTIALLYFILL»). Исполнение
+            # такой заявки НЕ окончательно: возможны дополнительные лоты,
+            # отмена или отказ брокера. Раньше учёт закрывался сразу
+            # (LEDGER_CLOSE по частично исполненной живой SELL) — дефект.
+            # Теперь:
+            #   - локальный учёт НЕ закрывается (никакого финального закрытия
+            #     по нетерминальному статусу);
+            #   - повторная отправка SELL не выполняется (заявка уже зарегистрирована;
+            #     SL/TP для UNCERTAIN не действуют — новых close-заявок нет);
+            #   - позиция переводится в UNCERTAIN, новые входы блокируются
+            #     (mismatch-путь в reconcile);
+            #   - разрешение — ТОЛЬКО терминальный отчёт этой SELL-заявки:
+            #     следующий вызов В2 закроет учёт с подтверждённой ценой
+            #     (FILL/CANCELLED/EXPIRED с executed_lots>0) или вернёт позицию
+            #     в штатное русло (REJECTED/CANCELLED без исполнения -> В3).
+            if status not in _TERMINAL_ORDER_STATUSES:
+                pos.state = PositionState.UNCERTAIN
+                client.uncertain_state = True
+                logging.error(
+                    f"[reconcile] {ticker}: SELL-заявка закрытия {oid} НЕТЕРМИНАЛЬНА "
+                    f"(status={status}, executed={executed}/{requested}), позиция "
+                    f"отсутствует у брокера — окончательное исполнение не доказано: "
+                    f"учёт НЕ закрыт, позиция UNCERTAIN, повторная SELL запрещена"
+                )
+                research_logger.log_event("SELL_NON_TERMINAL_CLOSE_BLOCKED", {
+                    "figi": pos.figi, "ticker": ticker, "order_id": oid,
+                    "status": status, "executed_lots": executed,
+                    "requested_lots": requested, "quantity": pos.quantity,
+                })
+                await notify(
+                    f"⚠️ <b>{ticker}</b>: позиция отсутствует у брокера, но SELL-заявка "
+                    f"закрытия ещё НЕ завершена ({status}, исполнено {executed}/{requested}).\n"
+                    f"Окончательное исполнение не доказано — учёт НЕ закрыт (UNCERTAIN), "
+                    f"новые входы заблокированы до терминального статуса заявки."
+                )
+                return "uncertain"
+            reason_text = str(rec.get("reason") or "")
+            close_reason = "LEDGER_CLOSE"
+            if reason_text.startswith("close:"):
+>               close_reason = reason_text[len("close:"):].split()[0].upper() or close_reason
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               IndexError: list index out of range
+
+main.py:1536: IndexError
+=========================== short test summary info ============================
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_a_reconcile_keeps_initial_request_timestamp
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_b_missing_position_ts_restored_from_own_cursor
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_c_no_historical_ts_left_absent_legacy_policy
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_d_cross_trade_timestamp_isolated_and_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_e_new_cursor_missing_trade_id_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_f_new_cursor_missing_figi_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_g_new_cursor_missing_side_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_h_new_cursor_wrong_identity_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_i_valid_new_cursor_recovery_completes
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_j_valid_legacy_cursor_recovery_completes
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_k_legacy_cursor_contradiction_fail_closed
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_l_conflict_task_stays_blocked_after_restart
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_m_empty_close_reason_no_indexerror_fallback
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_n_empty_close_reason_keeps_known_reason
+FAILED test_b2_v6_timestamp_identity_close_reason.py::test_v6_p_empty_reason_reconcile_uncertain_no_side_effects
+========================= 15 failed, 1 passed in 0.87s =========================

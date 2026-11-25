@@ -1,0 +1,24 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0 -- /home/z/.venv/bin/python3
+metadata: {'Python': '3.12.16', 'Platform': 'Linux-5.10.134-013.15.kangaroo.al8.x86_64-x86_64-with-glibc2.41', 'Packages': {'pytest': '9.0.2', 'pluggy': '1.6.0'}, 'Plugins': {'Faker': '40.1.2', 'metadata': '3.1.1', 'asyncio': '1.3.0', 'ddtrace': '4.2.2', 'cov': '7.0.0', 'json-report': '1.5.0', 'anyio': '4.13.0'}}
+rootdir: /home/z
+configfile: pyproject.toml
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 13 items
+
+test_b2_close_accounting.py::test_01_full_sell_23_via_b2_applies_via_cursor PASSED [  7%]
+test_b2_close_accounting.py::test_02_full_sell_already_applied_by_resolve_closing_no_double_apply PASSED [ 15%]
+test_b2_close_accounting.py::test_03_repeated_identical_terminal_report_no_reapplication PASSED [ 23%]
+test_b2_close_accounting.py::test_04_contradictory_repeat_with_increased_cumulative_fail_closed PASSED [ 30%]
+test_b2_close_accounting.py::test_05_partial_3_of_10_cancelled_lots_already_applied PASSED [ 38%]
+test_b2_close_accounting.py::test_06_partial_3_of_10_cancelled_b2_first_gets_terminal_report PASSED [ 46%]
+test_b2_close_accounting.py::test_07_csv_keeps_requested_10_and_executed_3 PASSED [ 53%]
+test_b2_close_accounting.py::test_08_actual_commission_and_execution_price_preserved PASSED [ 61%]
+test_b2_close_accounting.py::test_09_no_fictitious_pnl_for_externally_closed_remainder PASSED [ 69%]
+test_b2_close_accounting.py::test_10_b3_external_close_without_own_sell_unchanged PASSED [ 76%]
+test_b2_close_accounting.py::test_11a_ledger_sync_failure_safe_state PASSED [ 84%]
+test_b2_close_accounting.py::test_11b_unknown_status_without_broker_answer_no_false_closed PASSED [ 92%]
+test_b2_close_accounting.py::test_12_repeated_reconciliation_no_reapply_no_csv_duplicates PASSED [100%]
+
+============================== 13 passed in 0.28s ==============================

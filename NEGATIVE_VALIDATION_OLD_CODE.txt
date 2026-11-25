@@ -1,0 +1,452 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0
+rootdir: /tmp/negcheck
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 20 items
+
+test_b2_close_accounting.py .............FFFFFFF                         [100%]
+
+=================================== FAILURES ===================================
+___ test_b2_terminal_ledger_record_without_cursor_recovers_broker_commission ___
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_b2_terminal_ledger_record0')
+
+    def test_b2_terminal_ledger_record_without_cursor_recovers_broker_commission(isolated_paths):
+        """Запись реестра уже полна (терминальный статус, executed_lots,
+        avg_exec_price), per-order cursor в позиции отсутствует, комиссии в
+        записи нет. Раньше опрос брокера не выполнялся и apply_close_execution
+        получал commission=None — фактическая комиссия терялась. Теперь
+        неизвестная комиссия — самостоятельное основание для запроса отчёта
+        брокера; комиссия восстанавливается штатным применением."""
+        ledger = fresh_ledger(isolated_paths)
+        pos = make_buy_pos(quantity=10)
+        monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
+        oid = "sell-ledger-comm"
+        # 1-2. В реестре УЖЕ есть терминальная запись SELL с requested_lots,
+        #       executed_lots и avg_exec_price.
+        assert ledger.record_intent(oid, trade_id=pos.trade_id, figi=pos.figi,
+                                    ticker=pos.ticker, side="SELL",
+                                    requested_lots=10, reason="close:SL")
+        backdate(ledger, oid, datetime.now(UTC) - timedelta(minutes=59))
+        assert ledger.record_status(oid, "FILL", figi="F1", ticker="TEST",
+                                    side="SELL", requested_lots=10,
+                                    executed_lots=10, avg_exec_price=100.0)
+        rec = ledger.latest(oid)
+        assert rec["status"] == "FILL"
+        assert int(rec["executed_lots"]) == 10
+        assert float(rec["avg_exec_price"]) == pytest.approx(100.0)
+        # 4. Фактической комиссии в записи нет.
+        assert rec.get("commission") is None
+        # 3. Per-order cursor в позиции отсутствует.
+        assert oid not in (getattr(pos, "close_orders", {}) or {})
+        # 5. Брокерский отчёт возвращает фактическую комиссию 1.25.
+        client = FakeClient(order_state=FakeState(
+            status_code=1, lots_executed=10, price_units=1000,
+            commission=_MV(1, 250000000)))
+    
+        action = run(main._try_resolve_absent_position(client, ledger, pos, monitor))
+    
+        # 6. B2 применил исполнение штатно (apply_close_execution).
+        assert action == "ledger_close"
+        # Опрос брокера ВЫПОЛНЕН, несмотря на полную запись (ради комиссии).
+>       assert any(str(c[0]) == oid for c in client.state_calls)
+E       assert False
+E        +  where False = any(<generator object test_b2_terminal_ledger_record_without_cursor_recovers_broker_commission.<locals>.<genexpr> at 0x7f9cdefbba00>)
+
+test_b2_close_accounting.py:761: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 08:39:13,177 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-ledger-comm (10/10 лот., price=100.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,178 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-ledger-comm: 10 лот. по 100.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-ledger-comm (10/10 лот., price=100.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-ledger-comm: 10 лот. по 100.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+_____________ test_b2_record_commission_reused_without_broker_poll _____________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_b2_record_commission_reus0')
+
+    def test_b2_record_commission_reused_without_broker_poll(isolated_paths):
+        """Комиссия в записи: опрос брокера не требуется вовсе (запись полна —
+        и статус, и цена, и комиссия), сохранённое значение попадает в cursor
+        и позицию БЕЗ расчётной подстановки. Недоступный брокер не мешает."""
+        ledger = fresh_ledger(isolated_paths)
+        pos = make_buy_pos(quantity=10)
+        monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
+        oid = "sell-ledger-comm2"
+        assert ledger.record_intent(oid, trade_id=pos.trade_id, figi=pos.figi,
+                                    ticker=pos.ticker, side="SELL",
+                                    requested_lots=10, reason="close:TP")
+        backdate(ledger, oid, datetime.now(UTC) - timedelta(minutes=59))
+        assert ledger.record_status(oid, "FILL", figi="F1", ticker="TEST",
+                                    side="SELL", requested_lots=10,
+                                    executed_lots=10, avg_exec_price=100.0)
+        # Фактическая комиссия достоверно сохранена в записи.
+        ledger._latest[oid]["commission"] = 2.5
+        # Брокер недоступен: корректная реализация НЕ опрашивает его вовсе.
+        client = FakeClient(order_state=None)
+    
+        action = run(main._try_resolve_absent_position(client, ledger, pos, monitor))
+    
+        assert action == "ledger_close"
+        # Опроса нет: в записи уже всё известно, включая комиссию.
+        assert client.state_calls == []
+        cur = pos.close_orders[oid]
+        # Сохранённая фактическая комиссия — не расчётная (модельная для
+        # оборота (100+100)*10 дала бы 0.5/3.0 при COMMISSION_PER_SIDE
+        # 0.0005/0.003 — ни одно не равно 2.5).
+>       assert cur["commission"] == pytest.approx(2.5)
+E       assert None == 2.5 ± 2.5e-06
+E         
+E         comparison failed
+E         Obtained: None
+E         Expected: 2.5 ± 2.5e-06
+
+test_b2_close_accounting.py:823: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 08:39:13,228 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-ledger-comm2 (10/10 лот., price=100.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,229 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-ledger-comm2: 10 лот. по 100.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-ledger-comm2 (10/10 лот., price=100.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-ledger-comm2: 10 лот. по 100.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+__________ test_b2_terminal_repeat_different_status_is_contradiction ___________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_b2_terminal_repeat_differ0')
+
+    def test_b2_terminal_repeat_different_status_is_contradiction(isolated_paths):
+        """Первый отчёт CANCELLED 3/10 учтён; второй отчёт FILL 3/10 при том же
+        исполнении ПРОТИВОРЕЧИТ зафиксированному терминальному результату.
+        Совпадение количества и терминальности cursor'а не маскирует конфликт:
+        UNCERTAIN, без повторного применения, без закрытия позиции."""
+        ledger = fresh_ledger(isolated_paths)
+        pos = make_buy_pos(quantity=10)
+        monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
+        oid = "sell-rep-status"
+        setup_close_sell(ledger, pos, oid, requested=10)
+        ledger.record_sent(oid, figi="F1", ticker="TEST", side="SELL",
+                           requested_lots=10, executed_lots=0, status_hint="NEW")
+        # Первый терминальный отчёт: CANCELLED 3/10.
+        first_client = FakeClient(order_state=FakeState(
+            status_code=3, lots_executed=3, price_units=330,
+            commission=_MV(1, 500000000)))
+        assert run(main._try_resolve_absent_position(first_client, ledger, pos, monitor)) \
+            == "ledger_close"
+        cur = pos.close_orders[oid]
+        assert cur["status"] == "CANCELLED"
+        assert cur["applied_lots"] == 3
+        assert cur["confirmed_executed_lots"] == 3
+        assert pos.quantity == 0  # остаток закрыт внешне первой обработкой
+    
+        # Второй отчёт: статус сменился на FILL при том же исполнении 3/10.
+        second_client = FakeClient(order_state=FakeState(
+            status_code=1, lots_executed=3, price_units=330,
+            commission=_MV(1, 500000000)))
+        action = run(main._try_resolve_absent_position(second_client, ledger, pos, monitor))
+    
+        # Fail-closed: противоречие зафиксировано, учёт НЕ закрыт повторно.
+>       assert action == "uncertain"
+E       AssertionError: assert 'ledger_close' == 'uncertain'
+E         
+E         - uncertain
+E         + ledger_close
+
+test_b2_close_accounting.py:866: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 08:39:13,246 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-status (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,246 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-status: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+2026-11-24 08:39:13,247 - INFO - [execution] TEST: повторный терминальный отчёт sell-rep-status (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+2026-11-24 08:39:13,247 - INFO - [reconcile] TEST: повторный терминальный отчёт SELL sell-rep-status (executed=3) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+2026-11-24 08:39:13,247 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-status (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,247 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-status: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-status (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-status: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+INFO     root:execution.py:566 [execution] TEST: повторный терминальный отчёт sell-rep-status (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+INFO     root:main.py:1402 [reconcile] TEST: повторный терминальный отчёт SELL sell-rep-status (executed=3) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-status (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-status: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+___________ test_b2_terminal_repeat_different_price_is_contradiction ___________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_b2_terminal_repeat_differ1')
+
+    def test_b2_terminal_repeat_different_price_is_contradiction(isolated_paths):
+        """Первый терминальный отчёт с ценой 100 учтён; второй с ценой 101 при
+        том же исполнении противоречит подтверждённой цене cursor'а — UNCERTAIN."""
+        ledger = fresh_ledger(isolated_paths)
+        pos = make_buy_pos(quantity=10)
+        monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
+        oid = "sell-rep-price"
+        setup_close_sell(ledger, pos, oid, requested=10)
+        ledger.record_sent(oid, figi="F1", ticker="TEST", side="SELL",
+                           requested_lots=10, executed_lots=0, status_hint="NEW")
+        # Первый отчёт: CANCELLED 3/10 по цене 100 (300 / 3 лот. / lot=1).
+        first_client = FakeClient(order_state=FakeState(
+            status_code=3, lots_executed=3, price_units=300))
+        assert run(main._try_resolve_absent_position(first_client, ledger, pos, monitor)) \
+            == "ledger_close"
+        cur = pos.close_orders[oid]
+        assert cur["avg_exec_price"] == pytest.approx(100.0)
+        assert cur["applied_lots"] == 3
+    
+        # Второй отчёт: та же заявка, но цена 101.
+        second_client = FakeClient(order_state=FakeState(
+            status_code=3, lots_executed=3, price_units=303))
+        action = run(main._try_resolve_absent_position(second_client, ledger, pos, monitor))
+    
+>       assert action == "uncertain"
+E       AssertionError: assert 'ledger_close' == 'uncertain'
+E         
+E         - uncertain
+E         + ledger_close
+
+test_b2_close_accounting.py:914: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 08:39:13,264 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-price (3/10 лот., price=100.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,264 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-price: 3 лот. по 100.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+2026-11-24 08:39:13,264 - INFO - [execution] TEST: повторный терминальный отчёт sell-rep-price (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+2026-11-24 08:39:13,265 - INFO - [reconcile] TEST: повторный терминальный отчёт SELL sell-rep-price (executed=3) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+2026-11-24 08:39:13,265 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-price (3/10 лот., price=100.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,265 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-price: 3 лот. по 100.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-price (3/10 лот., price=100.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-price: 3 лот. по 100.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+INFO     root:execution.py:566 [execution] TEST: повторный терминальный отчёт sell-rep-price (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+INFO     root:main.py:1402 [reconcile] TEST: повторный терминальный отчёт SELL sell-rep-price (executed=3) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-price (3/10 лот., price=100.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-price: 3 лот. по 100.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+________ test_b2_terminal_repeat_different_commission_is_contradiction _________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_b2_terminal_repeat_differ2')
+
+    def test_b2_terminal_repeat_different_commission_is_contradiction(isolated_paths):
+        """Первый терминальный отчёт с фактической комиссией 1.5 учтён; второй с
+        комиссией 2.0 противоречит подтверждённой комиссии cursor'а — UNCERTAIN."""
+        ledger = fresh_ledger(isolated_paths)
+        pos = make_buy_pos(quantity=10)
+        monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
+        oid = "sell-rep-comm"
+        setup_close_sell(ledger, pos, oid, requested=10)
+        ledger.record_sent(oid, figi="F1", ticker="TEST", side="SELL",
+                           requested_lots=10, executed_lots=0, status_hint="NEW")
+        # Первый отчёт: CANCELLED 3/10, комиссия 1.5.
+        first_client = FakeClient(order_state=FakeState(
+            status_code=3, lots_executed=3, price_units=330,
+            commission=_MV(1, 500000000)))
+        assert run(main._try_resolve_absent_position(first_client, ledger, pos, monitor)) \
+            == "ledger_close"
+        cur = pos.close_orders[oid]
+        assert cur["commission"] == pytest.approx(1.5)
+        assert cur["applied_lots"] == 3
+    
+        # Второй отчёт: та же заявка/исполнение/цена, но комиссия 2.0.
+        second_client = FakeClient(order_state=FakeState(
+            status_code=3, lots_executed=3, price_units=330,
+            commission=_MV(2, 000000000)))
+        action = run(main._try_resolve_absent_position(second_client, ledger, pos, monitor))
+    
+>       assert action == "uncertain"
+E       AssertionError: assert 'ledger_close' == 'uncertain'
+E         
+E         - uncertain
+E         + ledger_close
+
+test_b2_close_accounting.py:958: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 08:39:13,282 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-comm (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,282 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-comm: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+2026-11-24 08:39:13,282 - INFO - [execution] TEST: повторный терминальный отчёт sell-rep-comm (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+2026-11-24 08:39:13,282 - INFO - [reconcile] TEST: повторный терминальный отчёт SELL sell-rep-comm (executed=3) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+2026-11-24 08:39:13,282 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-comm (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,283 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-comm: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-comm (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-comm: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+INFO     root:execution.py:566 [execution] TEST: повторный терминальный отчёт sell-rep-comm (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+INFO     root:main.py:1402 [reconcile] TEST: повторный терминальный отчёт SELL sell-rep-comm (executed=3) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-comm (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-comm: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+_________ test_b2_terminal_repeat_missing_optional_data_is_idempotent __________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_b2_terminal_repeat_missin0')
+
+    def test_b2_terminal_repeat_missing_optional_data_is_idempotent(isolated_paths):
+        """Новый отчёт не передал комиссию (отсутствующее значение), а в
+        cursor'е она подтверждена. Отсутствие данных — не несовпадение двух
+        достоверных значений: безопасный повтор, лоты повторно не списываются,
+        частичный результат и error_note первой обработки не искажаются."""
+        ledger = fresh_ledger(isolated_paths)
+        pos = make_buy_pos(quantity=10)
+        monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
+        oid = "sell-rep-missing"
+        setup_close_sell(ledger, pos, oid, requested=10)
+        ledger.record_sent(oid, figi="F1", ticker="TEST", side="SELL",
+                           requested_lots=10, executed_lots=0, status_hint="NEW")
+        # Первый отчёт: CANCELLED 3/10, комиссия 1.5.
+        first_client = FakeClient(order_state=FakeState(
+            status_code=3, lots_executed=3, price_units=330,
+            commission=_MV(1, 500000000)))
+        assert run(main._try_resolve_absent_position(first_client, ledger, pos, monitor)) \
+            == "ledger_close"
+        cur = pos.close_orders[oid]
+        assert cur["commission"] == pytest.approx(1.5)
+        assert pos.partial is True
+    
+        # Второй отчёт: те же статус/лоты/цена, НО без комиссии.
+        second_client = FakeClient(order_state=FakeState(
+            status_code=3, lots_executed=3, price_units=330))
+        action = run(main._try_resolve_absent_position(second_client, ledger, pos, monitor))
+    
+        # Безопасный повтор (не противоречие).
+        assert action == "ledger_close"
+        assert second_client.uncertain_state is False
+        # Лоты повторно не списаны; сохранённая комиссия не затёрта None.
+        assert cur["applied_lots"] == 3
+        assert cur["confirmed_executed_lots"] == 3
+        assert cur["commission"] == pytest.approx(1.5)
+        assert len(pos.close_applications) == 1
+        assert pos.actual_commission == pytest.approx(1.5)
+        # Частичный результат первой обработки сохранён (идемпотентность повтора).
+>       assert pos.partial is True
+E       AssertionError: assert False is True
+E        +  where False = TrackedPosition(figi='F1', ticker='TEST', direction='BUY', entry_price=100.0, quantity=0, sl_price=98.0, tp_price=104...._price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=True, close_order_request_id='sell-rep-missing').partial
+
+test_b2_close_accounting.py:1013: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 08:39:13,300 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-missing (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,300 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-missing: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+2026-11-24 08:39:13,300 - INFO - [execution] TEST: повторный терминальный отчёт sell-rep-missing (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+2026-11-24 08:39:13,300 - INFO - [reconcile] TEST: повторный терминальный отчёт SELL sell-rep-missing (executed=3) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+2026-11-24 08:39:13,300 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-missing (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,300 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-missing: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-missing (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-missing: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+INFO     root:execution.py:566 [execution] TEST: повторный терминальный отчёт sell-rep-missing (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+INFO     root:main.py:1402 [reconcile] TEST: повторный терминальный отчёт SELL sell-rep-missing (executed=3) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-missing (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-missing: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+______________ test_b2_terminal_repeat_exact_report_is_idempotent ______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-5/test_b2_terminal_repeat_exact_0')
+
+    def test_b2_terminal_repeat_exact_report_is_idempotent(isolated_paths):
+        """Идентичный терминальный отчёт (статус, лоты, цена, комиссия)
+        остаётся безопасным повтором: расширенная проверка идентичности не даёт
+        ложных противоречий, повторного списания нет."""
+        ledger = fresh_ledger(isolated_paths)
+        pos = make_buy_pos(quantity=10)
+        monitor = monitor_with(ExecutionMonitor(FakeClient()), pos)
+        oid = "sell-rep-exact"
+        setup_close_sell(ledger, pos, oid, requested=10)
+        ledger.record_sent(oid, figi="F1", ticker="TEST", side="SELL",
+                           requested_lots=10, executed_lots=0, status_hint="NEW")
+        first_client = FakeClient(order_state=FakeState(
+            status_code=3, lots_executed=3, price_units=330,
+            commission=_MV(0, 500000000)))
+        assert run(main._try_resolve_absent_position(first_client, ledger, pos, monitor)) \
+            == "ledger_close"
+        cur = pos.close_orders[oid]
+        applied_after_first = cur["applied_lots"]
+        history_after_first = list(pos.close_applications)
+    
+        # Полностью совпадающий второй отчёт.
+        second_client = FakeClient(order_state=FakeState(
+            status_code=3, lots_executed=3, price_units=330,
+            commission=_MV(0, 500000000)))
+        action = run(main._try_resolve_absent_position(second_client, ledger, pos, monitor))
+    
+        assert action == "ledger_close"
+        assert second_client.uncertain_state is False
+        assert cur["applied_lots"] == applied_after_first == 3
+        assert cur["confirmed_executed_lots"] == 3
+        assert cur["avg_exec_price"] == pytest.approx(110.0)
+        assert cur["commission"] == pytest.approx(0.5)
+        assert pos.close_applications == history_after_first  # история не выросла
+        assert pos.executed_lots == 3
+        assert pos.quantity == 0
+        assert pos.state == PositionState.CLOSED
+>       assert pos.partial is True
+E       AssertionError: assert False is True
+E        +  where False = TrackedPosition(figi='F1', ticker='TEST', direction='BUY', entry_price=100.0, quantity=0, sl_price=98.0, tp_price=104....ae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=True, close_order_request_id='sell-rep-exact').partial
+
+test_b2_close_accounting.py:1064: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 08:39:13,318 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-exact (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,318 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-exact: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+2026-11-24 08:39:13,318 - INFO - [execution] TEST: повторный терминальный отчёт sell-rep-exact (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+2026-11-24 08:39:13,318 - INFO - [reconcile] TEST: повторный терминальный отчёт SELL sell-rep-exact (executed=3) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+2026-11-24 08:39:13,318 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-exact (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+2026-11-24 08:39:13,319 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-exact: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-exact (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-exact: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+Остаток 7 лот. закрыт вне робота (без P&L).
+INFO     root:execution.py:566 [execution] TEST: повторный терминальный отчёт sell-rep-exact (CANCELLED, cumulative=3) — игнорируется (уже учтён per-order cursor'ом)
+INFO     root:main.py:1402 [reconcile] TEST: повторный терминальный отчёт SELL sell-rep-exact (executed=3) — исполнение уже учтено per-order cursor'ом, повторное списание не выполняется
+WARNING  root:main.py:1470 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-rep-exact (3/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (LEDGER_CLOSE), CSV-строка будет записана
+INFO     root:main.py:764 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-rep-exact: 3 лот. по 110.0
+Причина: LEDGER_CLOSE. Учёт закрыт, CSV будет записан.
+=========================== short test summary info ============================
+FAILED test_b2_close_accounting.py::test_b2_terminal_ledger_record_without_cursor_recovers_broker_commission
+FAILED test_b2_close_accounting.py::test_b2_record_commission_reused_without_broker_poll
+FAILED test_b2_close_accounting.py::test_b2_terminal_repeat_different_status_is_contradiction
+FAILED test_b2_close_accounting.py::test_b2_terminal_repeat_different_price_is_contradiction
+FAILED test_b2_close_accounting.py::test_b2_terminal_repeat_different_commission_is_contradiction
+FAILED test_b2_close_accounting.py::test_b2_terminal_repeat_missing_optional_data_is_idempotent
+FAILED test_b2_close_accounting.py::test_b2_terminal_repeat_exact_report_is_idempotent
+========================= 7 failed, 13 passed in 0.41s =========================

@@ -1,0 +1,76 @@
+TEST_RESULTS.txt — samsung_merge_candidate_v6 (v2.3.9-stage1)
+=============================================================
+
+Команда прогонов (все среды):
+  python3 -m pytest -p no:cacheprovider --continue-on-collection-errors -q
+
+Окружение: Python 3.12.16, pytest 9.0.2, Linux sandbox.
+Baseline выполнен на КОПИИ полного рабочего дерева с точным кодом v5
+(main.py/execution.py/logger.py побайтово = кандидатная папка v5) ДО
+изменений v6; final — на той же копии после изменений.
+
+1) BASELINE (точный код v5 = samsung_merge_candidate_v5, до изменений v6)
+   74 failed, 627 passed, 1 error
+   Лог: appendix_BASELINE_FULL_PYTEST.txt
+   FAILED/ERROR набор (по именам): appendix_baseline_failed_names.txt —
+   74 FAILED + 1 collection error корневого test_execution.py
+   (pre-existing, не связан с B2); совпадает с финальным набором v5.
+
+2) FINAL (код v6, после изменений)
+   74 failed, 643 passed, 1 error
+   Лог: appendix_FINAL_FULL_PYTEST.txt
+   Разница с baseline: +16 passed (новые тесты V6-A..P); FAILED и
+   ERROR/collection errors сравнены ПО КОНКРЕТНЫМ ИМЕНАМ (не по
+   количеству):
+     diff appendix_baseline_failed_names.txt appendix_final_failed_names.txt
+     => пусто (наборы ИДЕНТИЧНЫ, новых FAILED/ERROR нет; единственный
+     ERROR — pre-existing collection error test_execution.py, идентичен
+     в baseline и final).
+
+3) Прежние B2-тесты (51) на коде v6: 51 passed
+   test_b2_close_accounting.py (20)
+   test_b2_csv_recovery.py (10)
+   test_b2_terminal_metadata_recovery.py (12)
+   test_b2_v4_accounting_consistency.py (9)
+   test_b2_v5_identity_and_timestamp.py (10)
+   Лог: appendix_B2_TESTS_OUTPUT.txt
+
+4) Новые тесты V6-A..P (16) на коде v6: 16 passed
+   test_b2_v6_timestamp_identity_close_reason.py
+   Лог: appendix_V6_TESTS_OUTPUT.txt
+     V6-A reconcile_keeps_initial_request_timestamp            PASSED
+     V6-B missing_position_ts_restored_from_own_cursor         PASSED
+     V6-C no_historical_ts_left_absent_legacy_policy           PASSED
+     V6-D cross_trade_timestamp_isolated_and_fail_closed       PASSED
+     V6-E new_cursor_missing_trade_id_fail_closed              PASSED
+     V6-F new_cursor_missing_figi_fail_closed                  PASSED
+     V6-G new_cursor_missing_side_fail_closed                  PASSED
+     V6-H new_cursor_wrong_identity_fail_closed                PASSED
+     V6-I valid_new_cursor_recovery_completes                  PASSED
+     V6-J valid_legacy_cursor_recovery_completes               PASSED
+     V6-K legacy_cursor_contradiction_fail_closed              PASSED
+     V6-L conflict_task_stays_blocked_after_restart            PASSED
+     V6-M empty_close_reason_no_indexerror_fallback            PASSED
+     V6-N empty_close_reason_keeps_known_reason                PASSED
+     V6-O normal_close_reason_unchanged                        PASSED
+     V6-P empty_reason_reconcile_uncertain_no_side_effects     PASSED
+
+5) НЕГАТИВНАЯ ВАЛИДАЦИЯ: тесты V6 на коде v5 (до исправлений):
+   => 15 failed, 1 passed
+   Лог: appendix_NEGATIVE_VALIDATION_OLD_CODE.txt
+   V6-A..N и V6-P падают на v5 (ловят дефекты A/B/C); V6-O проходит
+   (регрессионный guard: обычная причина close:STOP_LOSS разбиралась
+   корректно и в v5).
+
+6) Сравнение FAILED/ERROR по именам (baseline vs final):
+   diff baseline_names final_names => пусто
+   (наборы идентичны, ни одного нового/исчезнувшего FAILED;
+    единственный ERROR — pre-existing collection error корневого
+    test_execution.py, идентичен в baseline и final).
+
+STRATEGY LOGIC: UNCHANGED
+RESEARCH ONLY
+NO THRESHOLD IS OPTIMIZED
+NO FILTER IS INSTALLED
+NO LIVE ORDERS
+OOS SEALED / H4 EXECUTION NOT AUTHORIZED

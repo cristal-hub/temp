@@ -1,0 +1,15 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0
+rootdir: /home/z
+configfile: pyproject.toml
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 61 items
+
+test_b2_close_accounting.py ....................                         [ 32%]
+test_b2_csv_recovery.py ..............                                   [ 55%]
+test_b2_terminal_metadata_recovery.py ........                           [ 68%]
+test_b2_v4_accounting_consistency.py .........                           [ 83%]
+test_b2_v5_identity_and_timestamp.py ..........                          [100%]
+
+============================== 61 passed in 1.03s ==============================

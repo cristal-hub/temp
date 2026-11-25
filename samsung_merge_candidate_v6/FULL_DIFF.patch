@@ -1,0 +1,474 @@
+--- a/main.py
++++ b/main.py
+@@ -1323,6 +1323,71 @@
+     return [rec for _, rec in candidates]
+ 
+ 
++def _valid_saved_ts(value) -> Optional[str]:
++    """v2.3.9-stage1 (B2 V6, Defect A): валидатор СОХРАНЁННОГО исторического
++    времени. Валидное — непустая строка, разбирающаяся как ISO datetime
++    (_parse_iso_ts); мусорные значения валидным временем не считаются."""
++    s = str(value or "").strip()
++    return s if (s and _parse_iso_ts(s) is not None) else None
++
++
++def _restore_close_requested_at(pos, oid) -> Optional[str]:
++    """v2.3.9-stage1 (B2 V6, Defect A): восстановление ПЕРВОНАЧАЛЬНОГО
++    времени ЗАПРОСА SELL при разрешении «позиция отсутствует у брокера» (В2).
++
++    ПЕРВОНАЧАЛЬНОЕ время запроса SELL — НЕИЗМЕНЯЕМЫЙ факт. Приоритет
++    (ТЗ V6 п.2.2):
++      1) существующий ВАЛИДНЫЙ pos.close_requested_at — перезаписи не
++         подлежит НИКОГДА: ни updated_at_utc/timestamp_utc реестра (это
++         метаданные ledger о времени СИНХРОНИЗАЦИИ записи, не о запросе
++         SELL), ни время восстановления статуса, ни время текущего запуска;
++      2) requested_at СВОЕГО per-order close cursor'а
++         (close_orders[oid]["requested_at"] — время, сохранённое
++         close_position()/add_close_order() ДО отправки SELL);
++      3) requested_at СВОЕЙ записи close_orders, доступной через ДРУГОЙ
++         сохранённый идентификатор ЭТОЙ ЖЕ заявки (close_order_request_id /
++         close_order_id);
++      4) достоверного исторического времени нет -> None. datetime.now()
++         внутрь восстановления НЕ подставляется: управление передаётся
++         СУЩЕСТВУЮЩЕЙ явно обозначенной legacy-политике записи CSV
++         (_close_request_ts -> None -> момент записи строки в trade_row).
++
++    Запрещено и НЕ реализовано: подмена известного timestamp на
++    updated_at_utc/timestamp_utc реестра, на время текущего запуска, на
++    время восстановления статуса, а также взятие timestamp другой заявки
++    или другой сделки (ищутся ТОЛЬКО записи СВОЕЙ close-заявки по
++    сохранённым идентификаторам ЭТОЙ позиции; случайные курсоры чужих
++    заявок не используются)."""
++    # 1) существующее валидное значение — неизменяемый факт
++    existing = _valid_saved_ts(getattr(pos, "close_requested_at", None))
++    if existing:
++        return existing
++    orders = getattr(pos, "close_orders", {}) or {}
++    if not isinstance(orders, dict):
++        orders = {}
++    # 2) requested_at собственного per-order cursor'а этой заявки
++    own = orders.get(str(oid))
++    if isinstance(own, dict):
++        ts = _valid_saved_ts(own.get("requested_at"))
++        if ts:
++            return ts
++    # 3) собственная запись close_orders через другой идентификатор ТОЙ ЖЕ
++    #    заявки (клиентский UUID / биржевой ID)
++    for alt in (getattr(pos, "close_order_request_id", None),
++                getattr(pos, "close_order_id", None)):
++        alt_id = str(alt or "").strip()
++        if not alt_id or alt_id == str(oid):
++            continue
++        rec_cursor = orders.get(alt_id)
++        if isinstance(rec_cursor, dict):
++            ts = _valid_saved_ts(rec_cursor.get("requested_at"))
++            if ts:
++                return ts
++    # 4) исторического времени нет — оставить отсутствующим (None);
++    #    legacy-политика применяется ТОЛЬКО на записи CSV
++    return None
++
++
+ def _finalize_position_closed(pos, *, sold_lots: int, exit_price,
+                               close_reason: str, order_id: str,
+                               requested_at: str, note: str,
+@@ -1531,9 +1596,28 @@
+             )
+             return "uncertain"
+         reason_text = str(rec.get("reason") or "")
++        # v2.3.9-stage1 (B2 V6, Defect C): разбор причины безопасен при
++        # ПУСТОЙ причине ("close:" / "close:   ") — раньше выражение
++        # reason_text[len("close:"):].split()[0] бросало IndexError
++        # (IndexError: list index out of range) и весь reconcile падал.
++        # Путь достижим: UNCERTAIN-позиция, отсутствующая у брокера, со
++        # СВОЕЙ close-заявкой и пустым close_reason (record_intent записал
++        # reason="close:" при пустом pos.close_reason).
++        # Приоритет (без новых типов закрытия, семантика обычных причин
++        # НЕ меняется): явная причина из реестра -> прежняя известная
++        # причина позиции -> существующий безопасный fallback проекта
++        # ("LEDGER_CLOSE"). Обычные причины (close:STOP_LOSS и т.п.)
++        # разбираются ТОЧНО как раньше.
+         close_reason = "LEDGER_CLOSE"
+         if reason_text.startswith("close:"):
+-            close_reason = reason_text[len("close:"):].split()[0].upper() or close_reason
++            reason_tail = reason_text[len("close:"):].strip()
++            reason_head = reason_tail.split()[0].upper() if reason_tail else ""
++            if reason_head:
++                close_reason = reason_head
++            elif getattr(pos, "close_reason", None):
++                # пустая причина в реестре — прежняя известная причина
++                # позиции сохраняется (V6-N)
++                close_reason = str(pos.close_reason)
+         # ---- v2.3.4-stage1 (аудит B2 close accounting): исполнение СВОЕЙ
+         # SELL-заявки применяется ШТАТНЫМ per-order механизмом
+         # ExecutionMonitor.apply_close_execution(): per-order cursor
+@@ -1713,10 +1797,23 @@
+         pos.close_reason = close_reason
+         if not pos.close_requested_lots:
+             pos.close_requested_lots = original_requested or int(executed)
+-        pos.close_requested_at = (rec.get("updated_at_utc")
+-                                  or rec.get("timestamp_utc")
+-                                  or pos.close_requested_at
+-                                  or datetime.now(timezone.utc).isoformat())
++        # v2.3.9-stage1 (B2 V6, Defect A): первоначальное время запроса SELL —
++        # НЕИЗМЕНЯЕМЫЙ факт. Раньше это место перезаписывало
++        # pos.close_requested_at значением rec.updated_at_utc /
++        # rec.timestamp_utc реестра (временем ПОЗДНЕГО восстановления
++        # заявки) либо datetime.now() — CSV получал искажённый exit_time и
++        # chronological cumulative P&L ломался. Теперь:
++        #   1) существующий валидный close_requested_at не перезаписывается
++        #      никогда; 2) при отсутствии — requested_at СВОЕГО per-order
++        #      cursor'а; 3) затем — requested_at собственной записи
++        #      close_orders через другой сохранённый идентификатор этой же
++        #      заявки; 4) если исторического времени нет — остаётся None и
++        #      управление передаётся существующей явно обозначенной
++        #      legacy-политике записи CSV (см. _close_request_ts).
++        # updated_at_utc/timestamp_utc реестра остаются метаданными ledger
++        # и в close_requested_at не попадают; datetime.now() в функции
++        # восстановления не используется.
++        pos.close_requested_at = _restore_close_requested_at(pos, oid)
+         if not pos.close_price_before_order:
+             # как в _finalize_position_closed: при неизвестной цене «перед
+             # заявкой» slippage не искажается артефактом нулевой точки
+--- a/execution.py
++++ b/execution.py
+@@ -2,6 +2,37 @@
+ # Tsclp_v2.2_volatile — мониторинг позиций.
+ # Полная замена: совместимость с API Samsung + per-order учёт SELL.
+ #
++# ИЗМЕНЕНИЯ (v2.3.9-stage1 — B2 V6, Defect B: СТРОГАЯ проверка
++# идентичности per-order cursor'а; база v2.3.8-stage1):
++#   validate_recovery_identity() пропускала ПУСТЫЕ обязательные поля
++#   cursor'а (cur_tid/cur_figi/cur_side проверялись только «если
++#   непустые») — cursor мог существовать без обязательных
++#   идентификаторов и задача всё равно проходила проверку. Разделены
++#   ДВА формата:
++#     * НОВЫЙ формат (явный маркер identity_version=2, ставится текущей
++#       версией add_close_order()): обязательны trade_id, FIGI, side,
++#       идентификатор собственной заявки (order_id == ключу close_orders —
++#       связь с соответствующей close-заявкой); пустое/отсутствующее
++#       обязательное поле -> конфликт cursor_missing_* (fail-closed),
++#       противоречие снимку -> cursor_*_mismatch. Никакого молчаливого
++#       пропуска пустых обязательных полей.
++#     * LEGACY cursor (старые state.json, БЕЗ маркера версии): отдельная
++#       строго описанная политика — проверяются ВСЕ реально доступные
++#       (непустые) идентификаторы; противоречие — fail-closed; НЕПОЛНОТА
++#       проверки НЕ считается конфликтом (обратная совместимость), но и
++#       НЕ выдаётся за полную: режим проверки сохраняется в задаче
++#       (cursor_validation="legacy_limited", персистентен в state.json).
++#       Любой cursor без trade_id/figi/side автоматически «корректным
++#       legacy» НЕ считается, автоматического повышения старой записи до
++#       нового формата нет.
++#   Дополнительно: существующий cursor по ВТОРОЙ сохранённой ссылке той
++#   же close-заявки (клиентский UUID и биржевой ID — РАЗНЫЕ
++#   идентификаторы, ни один не подменяет другой) проверяется на
++#   противоречие снимку. _recovery_canonical_body исключает производные
++#   метаданные (cursor_validation) из сравнения дубликатов.
++#   Существующие механизмы (validate rec<->снимок, дедупликация,
++#   fail-closed протокол) не ослаблены.
++#
+ # ИЗМЕНЕНИЯ (v2.3.8-stage1 — B2 V5, Defect B: fail-closed валидация
+ # идентичности recovery-задач; база v2.3.7-stage1):
+ #   import_state() восстанавливал снимок задачи pending_csv_recoveries
+@@ -318,6 +349,15 @@
+     # Компактный реестр entry_order_id закрытых BUY-позиций (см. шапку);
+     # без лимита размера — обрезка теряла признаки старых закрытых сделок.
+ 
++    # v2.3.9-stage1 (B2 V6, Defect B): версия ФОРМАТА per-order cursor'а
++    # close-заявки. Начиная с этой версии add_close_order() записывает в
++    # каждую НОВУЮ запись cursor'а явный маркер "identity_version" со
++    # значением этой константы; записи БЕЗ маркера (старые state.json)
++    # обрабатываются ОТДЕЛЬНОЙ legacy-политикой validate_recovery_identity
++    # (проверка всех ДОСТУПНЫХ идентификаторов, неполнота не выдаётся за
++    # полную проверку — см. cursor_validation_mode / cursor_validation).
++    CURSOR_IDENTITY_VERSION = 2
++
+     def __init__(self, client):
+         self.client = client
+         self.positions: Dict[str, TrackedPosition] = {}
+@@ -383,12 +423,26 @@
+         if any(rec.get("trade_id") == trade_id
+                for rec in self.pending_csv_recoveries):
+             return  # уже в очереди (дедуп по стабильному trade_id)
++        # v2.3.9-stage1 (B2 V6, Defect B): режим проверки идентичности
++        # cursor'а этой задачи — производное метаданное снимка (персистентно
++        # в state.json); неполная (legacy) проверка НЕ выдаётся за полную.
++        oid_ref = str(getattr(pos, "close_order_request_id", None)
++                      or pos.close_order_id or "").strip()
++        cursor = ((getattr(pos, "close_orders", {}) or {}).get(oid_ref)
++                  if oid_ref else None)
++        if not isinstance(cursor, dict):
++            cursor_validation = "none"
++        elif self._cursor_is_new_format(cursor):
++            cursor_validation = "full"
++        else:
++            cursor_validation = "legacy_limited"
+         self.pending_csv_recoveries.append({
+             "version": 1,
+             "trade_id": trade_id,
+             "figi": pos.figi,
+             "ticker": pos.ticker,
+             "reason": "position_replaced_same_figi",
++            "cursor_validation": cursor_validation,
+             # Полный JSON-безопасный снимок позиции (asdict): при recovery
+             # восстанавливается через TrackedPosition.from_dict — в
+             # monitor.positions НЕ возвращается (учёт новой позиции
+@@ -592,7 +646,15 @@
+         ЭТАП 5Б: вызывается close_position (через monitor_ref) ДО отправки —
+         намерение SELL в журнале позиции появляется раньше сетевого вызова.
+         Ключ записи — клиентский UUID заявки (совпадает с ключом реестра).
+-        Повторный вызов с тем же ID и тем же количеством — без изменений."""
++        Повторный вызов с тем же ID и тем же количеством — без изменений.
++
++        v2.3.9-stage1 (B2 V6, Defect B): каждая НОВАЯ запись cursor'а
++        получает ЯВНЫЙ маркер формата identity_version=2
++        (CURSOR_IDENTITY_VERSION) — строгая проверка обязательных
++        идентификаторов при recovery (validate_recovery_identity).
++        Существующая запись НЕ повышается до нового формата автоматически
++        (идемпотентный повтор возвращает её как есть; легаси-записи
++        обрабатываются отдельной legacy-политикой)."""
+         if not order_id or int(requested_lots) <= 0:
+             raise ValueError("Нужны order_id и положительное requested_lots")
+         oid = str(order_id)
+@@ -609,6 +671,9 @@
+             "confirmed_executed_lots": 0, "applied_lots": 0,
+             "status": "INTENT", "requested_at": requested_at,
+             "avg_exec_price": None, "commission": None,
++            # v2.3.9-stage1 (B2 V6, Defect B): маркер НОВОГО формата cursor'а
++            # (строгая проверка обязательных идентификаторов при recovery).
++            "identity_version": ExecutionMonitor.CURSOR_IDENTITY_VERSION,
+         }
+         pos.close_orders[oid] = rec
+         return rec
+@@ -1244,15 +1309,119 @@
+     @staticmethod
+     def _recovery_canonical_body(rec) -> str:
+         """Каноническая форма записи задачи для сравнения дубликатов
+-        (без летучего маркера "conflict"); детерминированный JSON."""
++        (без летучего маркера "conflict" и производных метаданных
++        "cursor_validation" — оба значения выводимы из снимка задачи);
++        детерминированный JSON."""
+         return json.dumps(
+-            {k: v for k, v in rec.items() if k != "conflict"},
++            {k: v for k, v in rec.items()
++             if k not in ("conflict", "cursor_validation")},
+             ensure_ascii=False, sort_keys=True, default=str)
+ 
+     @staticmethod
++    def _cursor_is_new_format(cursor) -> bool:
++        """v2.3.9-stage1 (B2 V6, Defect B): True — cursor создан ТЕКУЩЕЙ
++        версией add_close_order() (явный маркер identity_version ==
++        CURSOR_IDENTITY_VERSION). Число и его строковое представление
++        эквивалентны (JSON-окружение: state.json). Записи без маркера —
++        legacy (см. _cursor_identity_conflict)."""
++        ver = (cursor or {}).get("identity_version")
++        if ver is None:
++            return False
++        try:
++            return int(str(ver).strip()) == int(
++                ExecutionMonitor.CURSOR_IDENTITY_VERSION)
++        except (TypeError, ValueError):
++            return False
++
++    @staticmethod
++    def _cursor_identity_conflict(pos, oid, cursor, snap_tid, snap_figi,
++                                  strict_new_format: bool) -> Optional[str]:
++        """v2.3.9-stage1 (B2 V6, Defect B): проверка ОДНОГО per-order
++        cursor'а close-заявки на идентичность снимку сделки.
++
++        strict_new_format=True (НОВЫЙ формат, маркер identity_version):
++        обязательные идентификаторы cursor'а — trade_id, FIGI, side и
++        идентификатор собственной заявки (order_id, равный ключу
++        close_orders — связь с соответствующей close-заявкой). Пустое или
++        отсутствующее обязательное поле -> конфликт cursor_missing_*
++        (fail-closed). Никакого молчаливого пропуска пустых обязательных
++        полей нового формата.
++
++        strict_new_format=False (LEGACY cursor, старые state.json):
++        проверяются ВСЕ реально доступные (непустые) идентификаторы;
++        НЕПОЛНОТА проверки НЕ считается конфликтом (обратная
++        совместимость), но и НЕ выдаётся за полную проверку — режим
++        проверки фиксируется cursor_validation_mode().
++
++        Противоречие ДОСТУПНОГО идентификатора снимку — конфликт в ОБОИХ
++        форматах (cursor_trade_id_mismatch / cursor_figi_mismatch /
++        cursor_side_mismatch / cursor_order_id_mismatch), fail-closed.
++        Клиентский UUID (close_order_request_id), биржевой ID
++        (close_order_id) и trade_id — РАЗНЫЕ идентификаторы: order_id
++        cursor'а обязан совпадать с ключом (собственной close-заявкой),
++        trade_id/figi/side — со снимком; ни один не подменяет другой."""
++        close_side = "SELL" if pos.direction == "BUY" else "BUY"
++        cur_tid = str(cursor.get("trade_id") or "").strip()
++        cur_figi = str(cursor.get("figi") or "").strip()
++        cur_side = str(cursor.get("side") or "").strip()
++        cur_oid = str(cursor.get("order_id") or "").strip()
++        # --- обязательные идентификаторы НОВОГО формата ---
++        if strict_new_format:
++            if not cur_tid:
++                return "cursor_missing_trade_id"
++            if not cur_figi:
++                return "cursor_missing_figi"
++            if not cur_side:
++                return "cursor_missing_side"
++            if not cur_oid:
++                return "cursor_missing_order_id"
++        # --- противоречия ДОСТУПНЫХ идентификаторов (оба формата) ---
++        if cur_tid and cur_tid != snap_tid:
++            return "cursor_trade_id_mismatch"
++        if cur_figi and cur_figi != snap_figi:
++            return "cursor_figi_mismatch"
++        if cur_side and cur_side != close_side:
++            return "cursor_side_mismatch"
++        if cur_oid and cur_oid != str(oid):
++            return "cursor_order_id_mismatch"
++        return None
++
++    @staticmethod
++    def cursor_validation_mode(rec) -> str:
++        """v2.3.9-stage1 (B2 V6, Defect B): режим проверки идентичности
++        per-order cursor'а recovery-задачи:
++          "full"           — НОВЫЙ формат cursor'а (identity_version),
++                             проверены все обязательные идентификаторы;
++          "legacy_limited" — LEGACY cursor (без маркера версии): проверены
++                             только реально доступные идентификаторы;
++                             неполная проверка НЕ выдаётся за полную;
++          "none"           — cursor отсутствует (no-cursor recovery-путь,
++                             legacy-снимок) или снимок невосстановим.
++        Значение сохраняется в задаче (cursor_validation, персистентен в
++        state.json) — аудит видит, что проверка legacy-записи была
++        ОГРАНИЧЕННОЙ."""
++        if not isinstance(rec, dict):
++            return "none"
++        try:
++            pos = TrackedPosition.from_dict(rec.get("position") or {})
++        except Exception:
++            return "none"
++        req_id = getattr(pos, "close_order_request_id", None)
++        exch_id = pos.close_order_id
++        oid = str(req_id or exch_id or "").strip()
++        if not oid:
++            return "none"
++        cursor = (getattr(pos, "close_orders", {}) or {}).get(oid)
++        if not isinstance(cursor, dict):
++            return "none"
++        return ("full" if ExecutionMonitor._cursor_is_new_format(cursor)
++                else "legacy_limited")
++
++    @staticmethod
+     def validate_recovery_identity(rec) -> Optional[str]:
+-        """v2.3.8-stage1 (B2 V5, Defect B): проверка согласованности внешней
+-        записи recovery-задачи и её снимка позиции.
++        """v2.3.8-stage1 (B2 V5, Defect B); v2.3.9-stage1 (B2 V6, Defect B):
++        проверка согласованности внешней записи recovery-задачи и её снимка
++        позиции.
+ 
+         Возвращает None (задача идентично согласована) или ПРИЧИНУ конфликта
+         (строка). Проверяются:
+@@ -1261,13 +1430,23 @@
+           * наличие стабильного trade_id и FIGI;
+           * наличие СВОЕЙ close-заявки (close_order_request_id /
+             close_order_id — клиентский UUID или биржевой ID);
+-          * при наличии per-order cursor'а для этой заявки — совпадение
+-            cursor'а со сделкой (trade_id, FIGI, сторона заявки).
++          * v2.3.9-stage1 (V6): СТРОГАЯ проверка per-order cursor'а этой
++            заявки:
++            - НОВЫЙ формат (identity_version): обязательны trade_id, FIGI,
++              side, order_id (== ключу close_orders); пустое обязательное
++              поле — конфликт cursor_missing_*, противоречие —
++              cursor_*_mismatch (fail-closed);
++            - LEGACY (без маркера версии): проверяются все ДОСТУПНЫЕ
++              идентификаторы, противоречие — fail-closed, неполнота —
++              НЕ конфликт, но и НЕ полная проверка
++              (cursor_validation="legacy_limited");
++          * существующий cursor по ВТОРОЙ сохранённой ссылке той же
++            close-заявки (клиентский UUID / биржевой ID) также не может
++            противоречить снимку — ни один идентификатор не подменяет
++            другой.
+         Отсутствующий cursor (легаси-снимок) НЕ конфликт: опрос невозможен,
+-        но и подмены идентичности нет — штатный no_cursor-путь recovery.
+-        Клиентский UUID, биржевой ID и trade_id — РАЗНЫЕ идентификаторы;
+-        смешение проверяется через привязку cursor'а (trade_id/figi/side
+-        записываются в cursor при add_close_order по данным СВОЕЙ сделки)."""
++        но и подмены идентичности нет — штатный no_cursor-путь recovery
++        (cursor_validation="none")."""
+         if not isinstance(rec, dict):
+             return "not_dict"
+         snap = rec.get("position")
+@@ -1294,18 +1473,32 @@
+         oid = str(req_id or exch_id or "").strip()
+         if not oid:
+             return "no_close_order_ref"
+-        cursor = (getattr(pos, "close_orders", {}) or {}).get(oid)
++        close_orders = (getattr(pos, "close_orders", {}) or {})
++        if not isinstance(close_orders, dict):
++            close_orders = {}
++        cursor = close_orders.get(oid)
+         if cursor is not None:
+-            close_side = "SELL" if pos.direction == "BUY" else "BUY"
+-            cur_tid = str(cursor.get("trade_id") or "").strip()
+-            cur_figi = str(cursor.get("figi") or "").strip()
+-            cur_side = str(cursor.get("side") or "").strip()
+-            if cur_tid and cur_tid != snap_tid:
+-                return "cursor_trade_id_mismatch"
+-            if cur_figi and cur_figi != snap_figi:
+-                return "cursor_figi_mismatch"
+-            if cur_side and cur_side != close_side:
+-                return "cursor_side_mismatch"
++            conflict = ExecutionMonitor._cursor_identity_conflict(
++                pos, oid, cursor, snap_tid, snap_figi,
++                ExecutionMonitor._cursor_is_new_format(cursor))
++            if conflict is not None:
++                return conflict
++        # v2.3.9-stage1 (B2 V6): ВТОРАЯ сохранённая ссылка той же
++        # close-заявки (клиентский UUID и биржевой ID — РАЗНЫЕ типы
++        # идентификаторов). Cursor по ней не обязан существовать, но
++        # существующий не может противоречить снимку: ни один
++        # идентификатор не подменяет другой только потому, что все они
++        # строки.
++        other_refs = {str(req_id or "").strip(),
++                      str(exch_id or "").strip()} - {oid, ""}
++        for ref in sorted(other_refs):
++            alt_cursor = close_orders.get(ref)
++            if isinstance(alt_cursor, dict):
++                conflict = ExecutionMonitor._cursor_identity_conflict(
++                    pos, ref, alt_cursor, snap_tid, snap_figi,
++                    ExecutionMonitor._cursor_is_new_format(alt_cursor))
++                if conflict is not None:
++                    return conflict
+         return None
+ 
+     def _import_pending_recoveries(self, raw_pending) -> List[dict]:
+@@ -1380,6 +1573,13 @@
+                     f"trade_id={display_tid} — конфликт идентичности "
+                     f"({conflict}) — оставлена с маркером, брокер не "
+                     "опрашивается, CSV не изменяется (fail-closed)")
++            # v2.3.9-stage1 (B2 V6, Defect B): режим проверки идентичности
++            # cursor'а этой задачи — производное метаданное снимка;
++            # персистентно (state.json). Неполная (legacy) проверка НЕ
++            # выдаётся за полную: в записи остаётся явный
++            # cursor_validation="legacy_limited". Ревалидация при импорте
++            # идемпотентна (значение выводится из снимка заново).
++            cursor_validation = self.cursor_validation_mode(rec)
+             pending.append({
+                 "version": rec.get("version", 1),
+                 "trade_id": str(rec.get("trade_id")
+@@ -1389,10 +1589,19 @@
+                 "ticker": rec.get("ticker") or (snap.get("ticker") if isinstance(snap, dict) else "") or "",
+                 "reason": rec.get("reason", ""),
+                 "position": snap if isinstance(snap, dict) else snap,
++                "cursor_validation": cursor_validation,
+                 # v2.3.8-stage1: маркер конфликта персистентен (аудит);
+                 # None для согласованных задач — ключ не добавляется.
+                 **({"conflict": conflict} if conflict is not None else {}),
+             })
++            if (conflict is None and cursor_validation == "legacy_limited"):
++                logging.info(
++                    "[execution] import_state: recovery-задача "
++                    f"trade_id={display_tid} — LEGACY cursor (без маркера "
++                    "identity_version): проверены только доступные "
++                    "идентификаторы, неполная проверка НЕ является полной "
++                    "(cursor_validation=legacy_limited, обратная "
++                    "совместимость)")
+         return pending
+ 
+     def import_state(self, data):

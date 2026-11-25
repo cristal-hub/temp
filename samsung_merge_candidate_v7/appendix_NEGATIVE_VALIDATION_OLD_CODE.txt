@@ -1,0 +1,648 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0
+rootdir: /home/z
+configfile: pyproject.toml
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 19 items
+
+test_b2_v7_cursor_version_and_alt_timestamp.py FFFFFFFFFFFF.FFFFFF       [100%]
+
+=================================== FAILURES ===================================
+__________ test_v7_a_legacy_cursor_without_marker_uses_legacy_policy ___________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_a_legacy_cursor_withou0')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fe22a20>
+
+    def test_v7_a_legacy_cursor_without_marker_uses_legacy_policy(isolated_paths,
+                                                                  clock):
+        """Отсутствие ключа identity_version — ЕДИНСТВЕННОЕ основание legacy:
+        согласованный legacy cursor не блокируется (обратная совместимость),
+        проверка помечается как ОГРАНИЧЕННАЯ (legacy_limited), recovery
+        завершается штатно."""
+        tmp_path = isolated_paths
+        monitor, task = make_recovery_case(tmp_path, "t-v7a", "sell-a7")
+        snap_cursor = task["position"]["close_orders"]["sell-a7"]
+        del snap_cursor["identity_version"]  # ключа НЕТ -> legacy
+    
+        # Трихотомия: отсутствие ключа — ровно legacy (не invalid):
+>       assert ExecutionMonitor._cursor_identity_state(snap_cursor) == "legacy"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_identity_state'. Did you mean: '_cursor_identity_conflict'?
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:511: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,152 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,152 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,152 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7a с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,152 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7a с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+_______________ test_v7_b_supported_version_strict_check_passes ________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_b_supported_version_st0')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fb5f5c0>
+
+    def test_v7_b_supported_version_strict_check_passes(isolated_paths, clock):
+        """identity_version == CURSOR_IDENTITY_VERSION (2; число и строковое
+        представление эквивалентны в JSON-окружении) — НОВЫЙ формат: строгая
+        проверка обязательных полей проходит на полном наборе, режим full,
+        восстановление завершается штатно."""
+        tmp_path = isolated_paths
+        monitor, task = make_recovery_case(tmp_path, "t-v7b", "sell-b7")
+        snap_cursor = task["position"]["close_orders"]["sell-b7"]
+        assert snap_cursor["identity_version"] == \
+            ExecutionMonitor.CURSOR_IDENTITY_VERSION
+    
+>       assert ExecutionMonitor._cursor_identity_state(snap_cursor) == "new"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_identity_state'. Did you mean: '_cursor_identity_conflict'?
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:548: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,203 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,204 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,204 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7b с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,204 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7b с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+_____________ test_v7_c_corrupt_version_string_blocked_not_legacy ______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_c_corrupt_version_stri0')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fb63f20>
+
+    def test_v7_c_corrupt_version_string_blocked_not_legacy(isolated_paths, clock):
+        """Маркер присутствует, но нечисловой ("abc") — состояние invalid:
+        fail-closed (cursor_invalid_identity_version), режим проверки
+        invalid_version (НЕ legacy_limited), задача остаётся с конфликтом;
+        брокер не опрашивается, CSV не изменяется."""
+        tmp_path = isolated_paths
+        monitor, task = make_recovery_case(tmp_path, "t-v7c", "sell-c7")
+        snap_cursor = task["position"]["close_orders"]["sell-c7"]
+        snap_cursor["identity_version"] = "abc"
+    
+        # НЕ legacy: состояние invalid, fail-closed:
+>       assert ExecutionMonitor._cursor_identity_state(snap_cursor) == "invalid"
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_identity_state'. Did you mean: '_cursor_identity_conflict'?
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:585: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,220 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,221 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,221 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7c с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,221 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7c с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+__________________ test_v7_d_unknown_numeric_version_blocked ___________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_d_unknown_numeric_vers0')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fb63c80>
+
+    def test_v7_d_unknown_numeric_version_blocked(isolated_paths, clock):
+        """identity_version=1 (устаревшая/неизвестная) и 999 (будущая/
+        неизвестная) — состояние invalid: fail-closed, НЕ legacy. Никакого
+        автоматического повышения до поддерживаемой версии."""
+        tmp_path = isolated_paths
+        for bad_version, tid, oid in ((1, "t-v7d1", "sell-d71"),
+                                      (999, "t-v7d2", "sell-d72")):
+            monitor, task = make_recovery_case(tmp_path, tid, oid)
+            snap_cursor = task["position"]["close_orders"][oid]
+            snap_cursor["identity_version"] = bad_version
+>           assert ExecutionMonitor._cursor_identity_state(snap_cursor) == \
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                "invalid", f"identity_version={bad_version} — НЕ legacy"
+E           AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_identity_state'. Did you mean: '_cursor_identity_conflict'?
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:623: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,237 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,237 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,237 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7d1 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,238 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7d1 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+______________ test_v7_e_present_but_invalid_marker_blocked[None] ______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_e_present_but_invalid_0')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fb80680>
+bad_marker = None
+
+    @pytest.mark.parametrize("bad_marker", [None, "", 0, "0", False, "2.0", "  "])
+    def test_v7_e_present_but_invalid_marker_blocked(isolated_paths, clock,
+                                                     bad_marker):
+        """Маркер ПРИСУТСТВУЕТ, но пуст (None/""/"  "), нулевой (0/"0"),
+        логический False или не разбирается как поддерживаемая версия
+        ("2.0") — состояние invalid: fail-closed, НЕ legacy_limited, НЕ full."""
+        tmp_path = isolated_paths
+        tid = f"t-v7e-{repr(bad_marker)}"
+        monitor, task = make_recovery_case(tmp_path, tid, "sell-e7")
+        snap_cursor = task["position"]["close_orders"]["sell-e7"]
+        snap_cursor["identity_version"] = bad_marker  # ключ ПРИСУТСТВУЕТ
+    
+>       assert ExecutionMonitor._cursor_identity_state(snap_cursor) == "invalid", \
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            f"маркер {bad_marker!r} при ПРИСУТСТВУЮЩЕМ ключе — НЕ legacy"
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_identity_state'. Did you mean: '_cursor_identity_conflict'?
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:656: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,254 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,254 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,254 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7e-None с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,254 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7e-None с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+________________ test_v7_e_present_but_invalid_marker_blocked[] ________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_e_present_but_invalid_1')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fb81820>
+bad_marker = ''
+
+    @pytest.mark.parametrize("bad_marker", [None, "", 0, "0", False, "2.0", "  "])
+    def test_v7_e_present_but_invalid_marker_blocked(isolated_paths, clock,
+                                                     bad_marker):
+        """Маркер ПРИСУТСТВУЕТ, но пуст (None/""/"  "), нулевой (0/"0"),
+        логический False или не разбирается как поддерживаемая версия
+        ("2.0") — состояние invalid: fail-closed, НЕ legacy_limited, НЕ full."""
+        tmp_path = isolated_paths
+        tid = f"t-v7e-{repr(bad_marker)}"
+        monitor, task = make_recovery_case(tmp_path, tid, "sell-e7")
+        snap_cursor = task["position"]["close_orders"]["sell-e7"]
+        snap_cursor["identity_version"] = bad_marker  # ключ ПРИСУТСТВУЕТ
+    
+>       assert ExecutionMonitor._cursor_identity_state(snap_cursor) == "invalid", \
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            f"маркер {bad_marker!r} при ПРИСУТСТВУЮЩЕМ ключе — НЕ legacy"
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_identity_state'. Did you mean: '_cursor_identity_conflict'?
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:656: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,271 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,271 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,271 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7e-'' с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,272 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7e-'' с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+______________ test_v7_e_present_but_invalid_marker_blocked[0_0] _______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_e_present_but_invalid_2')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fa49820>
+bad_marker = 0
+
+    @pytest.mark.parametrize("bad_marker", [None, "", 0, "0", False, "2.0", "  "])
+    def test_v7_e_present_but_invalid_marker_blocked(isolated_paths, clock,
+                                                     bad_marker):
+        """Маркер ПРИСУТСТВУЕТ, но пуст (None/""/"  "), нулевой (0/"0"),
+        логический False или не разбирается как поддерживаемая версия
+        ("2.0") — состояние invalid: fail-closed, НЕ legacy_limited, НЕ full."""
+        tmp_path = isolated_paths
+        tid = f"t-v7e-{repr(bad_marker)}"
+        monitor, task = make_recovery_case(tmp_path, tid, "sell-e7")
+        snap_cursor = task["position"]["close_orders"]["sell-e7"]
+        snap_cursor["identity_version"] = bad_marker  # ключ ПРИСУТСТВУЕТ
+    
+>       assert ExecutionMonitor._cursor_identity_state(snap_cursor) == "invalid", \
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            f"маркер {bad_marker!r} при ПРИСУТСТВУЮЩЕМ ключе — НЕ legacy"
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_identity_state'. Did you mean: '_cursor_identity_conflict'?
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:656: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,288 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,288 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,288 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7e-0 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,288 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7e-0 с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+______________ test_v7_e_present_but_invalid_marker_blocked[0_1] _______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_e_present_but_invalid_3')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fa4b0e0>
+bad_marker = '0'
+
+    @pytest.mark.parametrize("bad_marker", [None, "", 0, "0", False, "2.0", "  "])
+    def test_v7_e_present_but_invalid_marker_blocked(isolated_paths, clock,
+                                                     bad_marker):
+        """Маркер ПРИСУТСТВУЕТ, но пуст (None/""/"  "), нулевой (0/"0"),
+        логический False или не разбирается как поддерживаемая версия
+        ("2.0") — состояние invalid: fail-closed, НЕ legacy_limited, НЕ full."""
+        tmp_path = isolated_paths
+        tid = f"t-v7e-{repr(bad_marker)}"
+        monitor, task = make_recovery_case(tmp_path, tid, "sell-e7")
+        snap_cursor = task["position"]["close_orders"]["sell-e7"]
+        snap_cursor["identity_version"] = bad_marker  # ключ ПРИСУТСТВУЕТ
+    
+>       assert ExecutionMonitor._cursor_identity_state(snap_cursor) == "invalid", \
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            f"маркер {bad_marker!r} при ПРИСУТСТВУЮЩЕМ ключе — НЕ legacy"
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_identity_state'. Did you mean: '_cursor_identity_conflict'?
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:656: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,306 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,306 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,306 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7e-'0' с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,306 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7e-'0' с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+_____________ test_v7_e_present_but_invalid_marker_blocked[False] ______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_e_present_but_invalid_4')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fa4b7d0>
+bad_marker = False
+
+    @pytest.mark.parametrize("bad_marker", [None, "", 0, "0", False, "2.0", "  "])
+    def test_v7_e_present_but_invalid_marker_blocked(isolated_paths, clock,
+                                                     bad_marker):
+        """Маркер ПРИСУТСТВУЕТ, но пуст (None/""/"  "), нулевой (0/"0"),
+        логический False или не разбирается как поддерживаемая версия
+        ("2.0") — состояние invalid: fail-closed, НЕ legacy_limited, НЕ full."""
+        tmp_path = isolated_paths
+        tid = f"t-v7e-{repr(bad_marker)}"
+        monitor, task = make_recovery_case(tmp_path, tid, "sell-e7")
+        snap_cursor = task["position"]["close_orders"]["sell-e7"]
+        snap_cursor["identity_version"] = bad_marker  # ключ ПРИСУТСТВУЕТ
+    
+>       assert ExecutionMonitor._cursor_identity_state(snap_cursor) == "invalid", \
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            f"маркер {bad_marker!r} при ПРИСУТСТВУЮЩЕМ ключе — НЕ legacy"
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_identity_state'. Did you mean: '_cursor_identity_conflict'?
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:656: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,323 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,323 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,323 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7e-False с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,323 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7e-False с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+______________ test_v7_e_present_but_invalid_marker_blocked[2.0] _______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_e_present_but_invalid_5')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fa4bfe0>
+bad_marker = '2.0'
+
+    @pytest.mark.parametrize("bad_marker", [None, "", 0, "0", False, "2.0", "  "])
+    def test_v7_e_present_but_invalid_marker_blocked(isolated_paths, clock,
+                                                     bad_marker):
+        """Маркер ПРИСУТСТВУЕТ, но пуст (None/""/"  "), нулевой (0/"0"),
+        логический False или не разбирается как поддерживаемая версия
+        ("2.0") — состояние invalid: fail-closed, НЕ legacy_limited, НЕ full."""
+        tmp_path = isolated_paths
+        tid = f"t-v7e-{repr(bad_marker)}"
+        monitor, task = make_recovery_case(tmp_path, tid, "sell-e7")
+        snap_cursor = task["position"]["close_orders"]["sell-e7"]
+        snap_cursor["identity_version"] = bad_marker  # ключ ПРИСУТСТВУЕТ
+    
+>       assert ExecutionMonitor._cursor_identity_state(snap_cursor) == "invalid", \
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            f"маркер {bad_marker!r} при ПРИСУТСТВУЮЩЕМ ключе — НЕ legacy"
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_identity_state'. Did you mean: '_cursor_identity_conflict'?
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:656: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,339 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,340 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,340 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7e-'2.0' с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,340 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7e-'2.0' с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+_______________ test_v7_e_present_but_invalid_marker_blocked[  ] _______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_e_present_but_invalid_6')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fa4eba0>
+bad_marker = '  '
+
+    @pytest.mark.parametrize("bad_marker", [None, "", 0, "0", False, "2.0", "  "])
+    def test_v7_e_present_but_invalid_marker_blocked(isolated_paths, clock,
+                                                     bad_marker):
+        """Маркер ПРИСУТСТВУЕТ, но пуст (None/""/"  "), нулевой (0/"0"),
+        логический False или не разбирается как поддерживаемая версия
+        ("2.0") — состояние invalid: fail-closed, НЕ legacy_limited, НЕ full."""
+        tmp_path = isolated_paths
+        tid = f"t-v7e-{repr(bad_marker)}"
+        monitor, task = make_recovery_case(tmp_path, tid, "sell-e7")
+        snap_cursor = task["position"]["close_orders"]["sell-e7"]
+        snap_cursor["identity_version"] = bad_marker  # ключ ПРИСУТСТВУЕТ
+    
+>       assert ExecutionMonitor._cursor_identity_state(snap_cursor) == "invalid", \
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            f"маркер {bad_marker!r} при ПРИСУТСТВУЮЩЕМ ключе — НЕ legacy"
+E       AttributeError: type object 'ExecutionMonitor' has no attribute '_cursor_identity_state'. Did you mean: '_cursor_identity_conflict'?
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:656: AttributeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,356 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,356 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,357 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7e-'  ' с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,357 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7e-'  ' с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+_______ test_v7_f_invalid_version_task_survives_restart_no_side_effects ________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_f_invalid_version_task0')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fa4f710>
+
+    def test_v7_f_invalid_version_task_survives_restart_no_side_effects(
+            isolated_paths, clock):
+        """Задача с identity_version=999: конфликт при импорте, переживает
+        повторный перезапуск с тем же маркером, не разблокируется, не
+        опрашивает брокера, не изменяет CSV, не удаляется; диагностическое
+        событие CSV_RECOVERY_TASK_CONFLICT записано; маркер версии не
+        «повышен»."""
+        tmp_path = isolated_paths
+        monitor, task = make_recovery_case(tmp_path, "t-v7f", "sell-f7")
+        task["position"]["close_orders"]["sell-f7"]["identity_version"] = 999
+    
+        # --- первый перезапуск (import_state): конфликт зафиксирован ---
+        monitor2 = restart(tmp_path, monitor)
+        assert len(monitor2.pending_csv_recoveries) == 1
+>       assert monitor2.pending_csv_recoveries[0].get("conflict") == \
+            "cursor_invalid_identity_version"
+E       AssertionError: assert None == 'cursor_invalid_identity_version'
+E        +  where None = <built-in method get of dict object at 0x7fc919e87840>('conflict')
+E        +    where <built-in method get of dict object at 0x7fc919e87840> = {'cursor_validation': 'legacy_limited', 'figi': 'F1', 'position': {'actual_commission': None, 'breakeven_moved': False..._id': 'sell-f7', 'to_applied_lots': 10}], 'close_applied_lots': 10, ...}, 'reason': 'position_replaced_same_figi', ...}.get
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:689: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,373 - INFO - ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+2026-11-24 17:43:23,373 - INFO - [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+2026-11-24 17:43:23,374 - WARNING - [execution] TEST: закрытая сделка trade_id=t-v7f с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+2026-11-24 17:43:23,374 - INFO - [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+2026-11-24 17:43:23,374 - INFO - [execution] import_state: recovery-задача trade_id=t-v7f — LEGACY cursor (без маркера identity_version): проверены только доступные идентификаторы, неполная проверка НЕ является полной (cursor_validation=legacy_limited, обратная совместимость)
+2026-11-24 17:43:23,374 - WARNING - [execution] import_state: восстановлено незавершённых recovery-задач CSV: 1
+2026-11-24 17:43:23,374 - INFO - [state] Загружено позиций: 1
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:3036 ✅ [CLOSED] TEST None entry=100.0000 exit=НЕИЗВЕСТНА lots=10 — P&L не рассчитан (PRICE_UNKNOWN)
+INFO     root:main.py:900 [notify] 🔒 <b>TEST</b> учёт закрыт по None
+Лотов: 10 (акций: 10)
+Цена исполнения неизвестна — P&L НЕ рассчитан (CSV-строка с пометкой PRICE_UNKNOWN).
+WARNING  root:execution.py:452 [execution] TEST: закрытая сделка trade_id=t-v7f с неполным восстановлением CSV архивирована перед заменой позиции по тому же FIGI (задача персистентна в state.json)
+INFO     root:execution.py:478 [execution] OPEN TEST qty=10 entry=100.0 sl=98.0 tp=104.0
+INFO     root:execution.py:1598 [execution] import_state: recovery-задача trade_id=t-v7f — LEGACY cursor (без маркера identity_version): проверены только доступные идентификаторы, неполная проверка НЕ является полной (cursor_validation=legacy_limited, обратная совместимость)
+WARNING  root:execution.py:1648 [execution] import_state: восстановлено незавершённых recovery-задач CSV: 1
+INFO     root:main.py:1226 [state] Загружено позиций: 1
+________________ test_v7_h_alt_cursor_foreign_trade_id_rejected ________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_h_alt_cursor_foreign_t0')
+
+    def test_v7_h_alt_cursor_foreign_trade_id_rejected(isolated_paths):
+        """Cursor под второй ссылкой той же заявки, но с trade_id другой
+        сделки (FIGI совпадает) — timestamp НЕ используется (время другой
+        сделки не попадает в close_requested_at)."""
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_alt_cursor_case(
+            monitor, "F1", "t-v7h", primary_oid="sell-h1", alt_oid="sell-h0",
+            alt_cursor=full_alt_cursor("t-v7h-OTHER", "F1", "sell-h0", T_1005))
+>       assert main._alt_cursor_identity_conflict(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            pos, "sell-h0", pos.close_orders["sell-h0"]) == "cursor_trade_id_mismatch"
+E       AttributeError: module 'main' has no attribute '_alt_cursor_identity_conflict'
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:776: AttributeError
+__________________ test_v7_i_alt_cursor_foreign_figi_rejected __________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_i_alt_cursor_foreign_f0')
+
+    def test_v7_i_alt_cursor_foreign_figi_rejected(isolated_paths):
+        """Чужой FIGI в альтернативном cursor'е — timestamp НЕ используется,
+        даже если trade_id совпадает (идентичность не подтверждена)."""
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_alt_cursor_case(
+            monitor, "F1", "t-v7i", primary_oid="sell-i1", alt_oid="sell-i0",
+            alt_cursor=full_alt_cursor("t-v7i", "F9", "sell-i0", T_1005))
+>       assert main._alt_cursor_identity_conflict(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            pos, "sell-i0", pos.close_orders["sell-i0"]) == "cursor_figi_mismatch"
+E       AttributeError: module 'main' has no attribute '_alt_cursor_identity_conflict'
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:792: AttributeError
+_____________ test_v7_j_alt_cursor_wrong_side_or_order_id_rejected _____________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_j_alt_cursor_wrong_sid0')
+
+    def test_v7_j_alt_cursor_wrong_side_or_order_id_rejected(isolated_paths):
+        """side, противоречащий направлению закрытия (BUY при SELL), и
+        order_id, не совпадающий с ключом поиска (подмена типа
+        идентификатора), — в обоих случаях timestamp НЕ используется."""
+        monitor = ExecutionMonitor(FakeClient())
+        # --- вариант 1: неправильный side ---
+        pos = make_alt_cursor_case(
+            monitor, "F1", "t-v7j1", primary_oid="sell-j1", alt_oid="sell-j0",
+            alt_cursor=full_alt_cursor("t-v7j1", "F1", "sell-j0", T_1005,
+                                       side="BUY"))
+>       assert main._alt_cursor_identity_conflict(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            pos, "sell-j0", pos.close_orders["sell-j0"]) == "cursor_side_mismatch"
+E       AttributeError: module 'main' has no attribute '_alt_cursor_identity_conflict'
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:810: AttributeError
+__________________ test_v7_k_alt_cursor_bad_version_rejected ___________________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_k_alt_cursor_bad_versi0')
+
+    def test_v7_k_alt_cursor_bad_version_rejected(isolated_paths):
+        """Альтернативный cursor с identity_version="abc" (и 999): все
+        идентификаторы совпадают, но версия некорректна — timestamp НЕ
+        используется (некорректная версия не ослабляет проверку)."""
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_alt_cursor_case(
+            monitor, "F1", "t-v7k", primary_oid="sell-k1", alt_oid="sell-k0",
+            alt_cursor=full_alt_cursor("t-v7k", "F1", "sell-k0", T_0905,
+                                       identity_version="abc"))
+>       assert main._alt_cursor_identity_conflict(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            pos, "sell-k0", pos.close_orders["sell-k0"]) == \
+            "cursor_invalid_identity_version"
+E       AttributeError: module 'main' has no attribute '_alt_cursor_identity_conflict'
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:851: AttributeError
+____________ test_v7_l_alt_cursor_conflict_safe_none_legacy_policy _____________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_l_alt_cursor_conflict_0')
+clock = <env_negative_v7.test_b2_v7_cursor_version_and_alt_timestamp._Clock object at 0x7fc92fa55b50>
+
+    def test_v7_l_alt_cursor_conflict_safe_none_legacy_policy(isolated_paths,
+                                                             clock):
+        """Интеграция: позиция с двумя ссылками; под альтернативной ссылкой —
+        cursor ЧУЖОЙ сделки того же FIGI (requested_at=10:05). B2 reconcile в
+        10:20 закрывает учёт по отчёту брокера, но close_requested_at
+        ОСТАЁТСЯ None: чужое время (10:05), время восстановления (10:20) и
+        время запуска НЕ подставляются; legacy-политика применяется ТОЛЬКО на
+        записи CSV (exit_time = момент записи 10:15, timestamp_utc пуст)."""
+        tmp_path = isolated_paths
+        monitor = ExecutionMonitor(FakeClient())
+        pos = make_alt_cursor_case(
+            monitor, "F1", "t-v7l", primary_oid="sell-l1", alt_oid="sell-l0",
+            alt_cursor=full_alt_cursor("t-v7l-OTHER", "F1", "sell-l0", T_1005))
+        pos.close_reason = "STOP_LOSS"
+    
+        ledger = make_b2_ledger_case(
+            tmp_path, clock, pos, "sell-l1", requested=LOTS,
+            reason="close:STOP_LOSS", intent_at=T_0905, late_status="NEW",
+            late_at=T_1020)
+        clock.set(T_1020)
+        client = FakeClient(order_state=terminal_report())
+        action = run(main._try_resolve_absent_position(client, ledger, pos, monitor))
+        assert action == "ledger_close"
+        assert pos.state == PositionState.CLOSED
+    
+        # Безопасная политика None: чужой timestamp и время восстановления не
+        # подставлены; datetime.now() внутрь восстановления не попал:
+>       assert pos.close_requested_at is None, \
+            "конфликтный альтернативный cursor — close_requested_at остаётся None"
+E       AssertionError: конфликтный альтернативный cursor — close_requested_at остаётся None
+E       assert '2026-11-20T10:05:00+00:00' is None
+E        +  where '2026-11-20T10:05:00+00:00' = TrackedPosition(figi='F1', ticker='TEST', direction='BUY', entry_price=100.0, quantity=0, sl_price=98.0, tp_price=104....=0.0, mae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=True, close_order_request_id='sell-l1').close_requested_at
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:897: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-24 17:43:23,466 - WARNING - [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-l1 (10/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (STOP_LOSS), CSV-строка будет записана
+2026-11-24 17:43:23,467 - INFO - [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-l1: 10 лот. по 110.0
+Причина: STOP_LOSS. Учёт закрыт, CSV будет записан.
+------------------------------ Captured log call -------------------------------
+WARNING  root:main.py:1833 [reconcile] TEST: позиция отсутствует у брокера, своя SELL-заявка sell-l1 (10/10 лот., price=110.0) — исполнение применено штатно (apply_close_execution), учёт закрыт (STOP_LOSS), CSV-строка будет записана
+INFO     root:main.py:900 [notify] ℹ️ <b>TEST</b>: позиция закрыта (подтверждено реестром заявок)
+SELL sell-l1: 10 лот. по 110.0
+Причина: STOP_LOSS. Учёт закрыт, CSV будет записан.
+______________ test_v7_m_two_trades_same_figi_no_timestamp_mixing ______________
+
+isolated_paths = PosixPath('/tmp/pytest-of-z/pytest-13/test_v7_m_two_trades_same_figi0')
+
+    def test_v7_m_two_trades_same_figi_no_timestamp_mixing(isolated_paths):
+        """Сделка 1 (t-v7m1, SELL sell-m1, запрос 09:05) и сделка 2
+        (t-v7m2, SELL sell-m2, запрос 10:05) — ОДИН FIGI. Контаминация обеих
+        сторон: под альтернативной ссылкой каждой позиции лежит cursor
+        ДРУГОЙ сделки того же FIGI. Ни 09:05, ни 10:05 не перетекают между
+        сделками (cursor_trade_id_mismatch -> None). Положительный контроль:
+        альтернативный cursor СОБСТВЕННОЙ сделки той же позиции (те же
+        trade_id/order_id) принимается."""
+        monitor = ExecutionMonitor(FakeClient())
+        # Сделка 1: свой cursor есть (без requested_at), альтернативная ссылка
+        # указывает на заявку СДЕЛКИ 2 (чужой cursor, 10:05):
+        pos1 = make_alt_cursor_case(
+            monitor, "F1", "t-v7m1", primary_oid="sell-m1", alt_oid="sell-m2")
+        pos1.close_orders["sell-m2"] = full_alt_cursor(
+            "t-v7m2", "F1", "sell-m2", T_1005)
+        # Сделка 2: свой cursor есть (без requested_at), альтернативная ссылка
+        # указывает на заявку СДЕЛКИ 1 (чужой cursor, 09:05):
+        pos2 = make_open_position(monitor, "F1", "t-v7m2")
+        monitor.add_close_order(pos2, "sell-m2", LOTS)
+        pos2.close_orders["sell-m2"]["requested_at"] = None
+        pos2.close_order_request_id = "sell-m2"
+        pos2.close_order_id = "sell-m1"
+        pos2.close_requested_lots = LOTS
+        pos2.close_requested_at = None
+        pos2.close_orders["sell-m1"] = full_alt_cursor(
+            "t-v7m1", "F1", "sell-m1", T_0905)
+    
+        # Чужой timestamp НЕ перетекает ни в одну из сделок:
+>       assert main._restore_close_requested_at(pos1, "sell-m1") is None, \
+            "timestamp сделки 2 (10:05) не используется сделкой 1"
+E       AssertionError: timestamp сделки 2 (10:05) не используется сделкой 1
+E       assert '2026-11-20T10:05:00+00:00' is None
+E        +  where '2026-11-20T10:05:00+00:00' = <function _restore_close_requested_at at 0x7fc91a17a340>(TrackedPosition(figi='F1', ticker='TEST', direction='BUY', entry_price=100.0, quantity=10, sl_price=98.0, tp_price=104...0.0, mae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=False, close_order_request_id='sell-m1'), 'sell-m1')
+E        +    where <function _restore_close_requested_at at 0x7fc91a17a340> = main._restore_close_requested_at
+
+test_b2_v7_cursor_version_and_alt_timestamp.py:950: AssertionError
+=========================== short test summary info ============================
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_a_legacy_cursor_without_marker_uses_legacy_policy
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_b_supported_version_strict_check_passes
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_c_corrupt_version_string_blocked_not_legacy
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_d_unknown_numeric_version_blocked
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[None]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[0_0]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[0_1]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[False]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[2.0]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_e_present_but_invalid_marker_blocked[  ]
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_f_invalid_version_task_survives_restart_no_side_effects
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_h_alt_cursor_foreign_trade_id_rejected
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_i_alt_cursor_foreign_figi_rejected
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_j_alt_cursor_wrong_side_or_order_id_rejected
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_k_alt_cursor_bad_version_rejected
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_l_alt_cursor_conflict_safe_none_legacy_policy
+FAILED test_b2_v7_cursor_version_and_alt_timestamp.py::test_v7_m_two_trades_same_figi_no_timestamp_mixing
+========================= 18 failed, 1 passed in 0.59s =========================

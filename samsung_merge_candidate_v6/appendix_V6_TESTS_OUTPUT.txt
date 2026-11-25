@@ -1,0 +1,27 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-9.0.2, pluggy-1.6.0 -- /home/z/.venv/bin/python3
+metadata: {'Python': '3.12.16', 'Platform': 'Linux-5.10.134-013.15.kangaroo.al8.x86_64-x86_64-with-glibc2.41', 'Packages': {'pytest': '9.0.2', 'pluggy': '1.6.0'}, 'Plugins': {'Faker': '40.1.2', 'metadata': '3.1.1', 'asyncio': '1.3.0', 'ddtrace': '4.2.2', 'cov': '7.0.0', 'json-report': '1.5.0', 'anyio': '4.13.0'}}
+rootdir: /home/z
+configfile: pyproject.toml
+plugins: Faker-40.1.2, metadata-3.1.1, asyncio-1.3.0, ddtrace-4.2.2, cov-7.0.0, json-report-1.5.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 16 items
+
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_a_reconcile_keeps_initial_request_timestamp PASSED [  6%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_b_missing_position_ts_restored_from_own_cursor PASSED [ 12%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_c_no_historical_ts_left_absent_legacy_policy PASSED [ 18%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_d_cross_trade_timestamp_isolated_and_fail_closed PASSED [ 25%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_e_new_cursor_missing_trade_id_fail_closed PASSED [ 31%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_f_new_cursor_missing_figi_fail_closed PASSED [ 37%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_g_new_cursor_missing_side_fail_closed PASSED [ 43%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_h_new_cursor_wrong_identity_fail_closed PASSED [ 50%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_i_valid_new_cursor_recovery_completes PASSED [ 56%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_j_valid_legacy_cursor_recovery_completes PASSED [ 62%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_k_legacy_cursor_contradiction_fail_closed PASSED [ 68%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_l_conflict_task_stays_blocked_after_restart PASSED [ 75%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_m_empty_close_reason_no_indexerror_fallback PASSED [ 81%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_n_empty_close_reason_keeps_known_reason PASSED [ 87%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_o_normal_close_reason_unchanged PASSED [ 93%]
+test_b2_v6_timestamp_identity_close_reason.py::test_v6_p_empty_reason_reconcile_uncertain_no_side_effects PASSED [100%]
+
+============================== 16 passed in 0.33s ==============================
