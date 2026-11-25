@@ -1,0 +1,700 @@
+# BUY ACCOUNTING AUDIT v1 — компактный код-патч (только production-код и
+# обновлённые тест-контракты; БЕЗ нового файла test_buy_accounting_audit.py —
+# он выгружается отдельно полным файлом).
+# Применение из корня КОПИИ кандидата samsung_B2_integrated_v1_v7:
+#   patch -p1 < BUY_DIFF_code_only_vs_B2_candidate.patch
+# Полный diff (включая новый тест-файл) — BUY_DIFF_vs_B2_candidate.patch
+# в ZIP/локальном комплекте (SHA256 в SHA256SUMS.txt).
+
+--- a/execution.py	2026-11-25 13:30:21.659598280 +0000
++++ b/execution.py	2026-11-25 13:36:50.034671737 +0000
+@@ -1256,12 +1256,16 @@
+ 
+     @staticmethod
+     def _extract_commission(state):
++        # BUY ACCOUNTING AUDIT (v1, FIX-3): commission = 0.0 — ДОСТОВЕРНОЕ
++        # значение брокера («комиссия реально нулевая»), оно отличается от
++        # отсутствующего значения (None). Прежнее поведение (0 -> None)
++        # теряло факт нулевой комиссии и подменяло её модельной.
+         try:
+             ec = getattr(state, "executed_commission", None)
+             if ec is None:
+                 return None
+             value = abs(float(ec.units) + float(ec.nano) / 1e9)
+-            return value if value > 0 else None
++            return value
+         except Exception:
+             return None
+ 
+
+--- a/main.py	2026-11-25 13:30:21.663598291 +0000
++++ b/main.py	2026-11-25 13:37:23.752765284 +0000
+@@ -2648,7 +2648,15 @@
+     # --- 2. Нужен ли опрос: неполные подтверждённые данные в строке ---
+     row_price = str(old_row.get("exit_price") or "").strip()
+     row_actual_comm = str(old_row.get("actual_commission_rub") or "").strip()
+-    needs_poll = (not row_price) or (not row_actual_comm)
++    # BUY ACCOUNTING AUDIT (v1, FIX-4): строка также считается неполной,
++    # когда в позиции ПОЗДНЕЕ обогащение комиссии входа (entry_commission)
++    # ещё не отражено в CSV (ТЗ-F/20: уточнение BUY-данных обновляет
++    # существующую запись и пересчитывает накопительный P&L).
++    row_entry_comm = str(old_row.get("entry_commission_rub") or "").strip()
++    pos_entry_comm = (f"{float(pos.entry_actual_commission):.2f}"
++                      if pos.entry_actual_commission is not None else "")
++    needs_poll = ((not row_price) or (not row_actual_comm)
++                  or (bool(pos_entry_comm) and row_entry_comm != pos_entry_comm))
+     if not needs_poll:
+         # Цена и фактическая комиссия уже подтверждены и записаны —
+         # опрос не требуется (комиссия source=mixed корректна, когда
+@@ -3294,6 +3302,54 @@
+     return df.set_index('time').sort_index()
+ 
+ 
++def _enrich_buy_entry_metadata(monitor: ExecutionMonitor, rm: RiskManager,
++                               pos, *, entry_commission, exec_price,
++                               order_id: str, source: str) -> bool:
++    """BUY ACCOUNTING AUDIT (v1, FIX-4): позднее обогащение существующей
++    записи позиции подтверждёнными метаданными брокера (ТЗ-E).
++
++    Правила:
++      * заполняются ТОЛЬКО отсутствующие значения (None):
++        entry_actual_commission (комиссия BUY-исполнения) и execution_price
++        (цена BUY-исполнения — актуальна для RECOVERY-записей, у которых
++        цена была неизвестна при регистрации);
++      * уже сохранённые значения НЕ перезаписываются (конфликт значений
++        идентифицируется на уровне реестра заявок — FIX-1 в order_ledger);
++      * лоты, цена входа (entry_price), SL/TP и состояние позиции НЕ
++        меняются — обогащаются только метаданные;
++      * каждое изменение немедленно сохраняется в state.json
++        (_save_state_checked) — реестр и state утверждают одно и то же.
++
++    Возвращает True, если хотя бы одно поле заполнено."""
++    if pos is None:
++        return False
++    enriched = []
++    try:
++        if entry_commission is not None and pos.entry_actual_commission is None:
++            value = float(entry_commission)
++            if value >= 0:
++                pos.entry_actual_commission = value
++                enriched.append("entry_commission")
++        if (exec_price is not None and float(exec_price) > 0
++                and pos.execution_price is None):
++            pos.execution_price = float(exec_price)
++            enriched.append("execution_price")
++    except (TypeError, ValueError):
++        return False
++    if not enriched:
++        return False
++    research_logger.log_event("BUY_ENTRY_METADATA_ENRICHED", {
++        "figi": pos.figi, "ticker": pos.ticker, "order_id": order_id,
++        "enriched": enriched,
++        "entry_commission": pos.entry_actual_commission,
++        "execution_price": pos.execution_price,
++        "position_state": pos.state.value if pos.state else None,
++        "source": source,
++    })
++    _save_state_checked(monitor, rm)
++    return True
++
++
+ async def register_executed_buy(
+     client: TinkoffClient,
+     monitor: ExecutionMonitor,
+@@ -3426,6 +3482,14 @@
+                 f"уже применено к позиции (entry_applied_lots={applied_closed}, "
+                 f"state={pos_closed.state.value}) — повторная регистрация не выполняется"
+             )
++            # BUY ACCOUNTING AUDIT (v1, FIX-4): закрытая запись позиции всё же
++            # может обогащаться поздними метаданными (комиссия/цена входа),
++            # если их не было при регистрации (ТЗ-E: обогащение существующей
++            # записи, а не потеря).
++            _enrich_buy_entry_metadata(
++                monitor, rm, pos_closed, entry_commission=entry_commission,
++                exec_price=exec_price, order_id=order_id,
++                source=source or "register_executed_buy")
+             return None
+         if evidence_closed_entry:
+             # Заявка относится к уже закрытой сделке (запись позиции
+@@ -3455,6 +3519,13 @@
+                     f"позиции ({executed_lots} лот. учтены) — «воскрешение» "
+                     f"запрещено, повторная регистрация не выполняется"
+                 )
++            # BUY ACCOUNTING AUDIT (v1, FIX-4): обогащение закрытой записи
++            # позиции отсутствующими метаданными входа (ТЗ-E) — без
++            # «воскрешения»: только entry_commission/execution_price.
++            _enrich_buy_entry_metadata(
++                monitor, rm, pos_closed, entry_commission=entry_commission,
++                exec_price=exec_price, order_id=order_id,
++                source=source or "register_executed_buy")
+             return None
+ 
+     if monitor.has_active_position(figi):
+@@ -3744,6 +3815,39 @@
+             # Сюда попадают только исполнения СВОЕЙ заявки (order_id совпадает
+             # с entry_order_id) — идемпотентность по entry_applied_lots.
+             applied = monitor.apply_late_entry_lots(existing, executed_lots, order_id)
++        # BUY ACCOUNTING AUDIT (v1, FIX-4): противоречивая комиссия повторного
++        # отчёта — fail-closed (ТЗ-B/11): значение не перезаписывается,
++        # фиксируется неопределённость и UNCERTAIN-запись реестра.
++        if (entry_commission is not None
++                and existing.entry_actual_commission is not None
++                and abs(float(existing.entry_actual_commission)
++                        - float(entry_commission)) > 1e-9):
++            client.uncertain_state = True
++            if ledger is not None:
++                ledger.record_uncertain(
++                    order_id, figi=figi, ticker=ticker, side="BUY",
++                    executed_lots=int(executed_lots),
++                    reason=(f"противоречивая комиссия BUY-исполнения повторного "
++                            f"отчёта: сохранена {existing.entry_actual_commission}, "
++                            f"в отчёте {entry_commission} — перезапись запрещена, "
++                            f"требуется сверка"),
++                    source=source or "register_executed_buy",
++                )
++            logging.error(
++                f"[register] {ticker}: повторный отчёт заявки {order_id} "
++                f"противоречит учтённой комиссии входа "
++                f"({existing.entry_actual_commission} vs {entry_commission}) — "
++                f"перезапись запрещена, UNCERTAIN (fail-closed)"
++            )
++            _save_state_checked(monitor, rm)
++            return existing
++        # BUY ACCOUNTING AUDIT (v1, FIX-4): позднее обогащение активной
++        # позиции отсутствующими метаданными входа (комиссия/цена, ТЗ-E).
++        # Лоты/цена входа/SL/TP не меняются; изменение немедленно сохраняется.
++        _enrich_buy_entry_metadata(
++            monitor, rm, existing, entry_commission=entry_commission,
++            exec_price=exec_price, order_id=order_id,
++            source=source or "register_executed_buy")
+         if ledger is not None and order_id:
+             rec = ledger.latest(order_id)
+             # Партия P0-5: действующая (ещё не разрешённая подтверждённой
+@@ -3783,6 +3887,7 @@
+                     ledger.record_status(
+                         order_id, ledger_status, executed_lots=executed_lots,
+                         avg_exec_price=exec_price,
++                        commission=entry_commission,
+                         reason=f"позднее исполнение применено к позиции "
+                                f"(+{existing.quantity - qty_before} лот., итого {existing.quantity})",
+                         source=source or "register_executed_buy",
+@@ -3858,6 +3963,7 @@
+                 ledger.record_status(
+                     order_id, ledger_status, executed_lots=executed_lots,
+                     avg_exec_price=exec_price,
++                    commission=entry_commission,
+                     reason=("неопределённость разрешена подтверждённой сверкой "
+                             "портфеля; повторный терминальный отчёт совпадает "
+                             "с учтённым исполнением — идемпотентность"),
+@@ -3867,6 +3973,7 @@
+                 ledger.record_status(
+                     order_id, ledger_status, executed_lots=executed_lots,
+                     avg_exec_price=exec_price,
++                    commission=entry_commission,
+                     reason="позиция уже зарегистрирована — идемпотентность",
+                     source=source or "register_executed_buy",
+                 )
+@@ -4049,6 +4156,7 @@
+                 order_id, ledger_status, trade_id=trade_id, figi=figi, ticker=ticker,
+                 side="BUY", requested_lots=requested_lots,
+                 executed_lots=executed_lots, avg_exec_price=exec_price,
++                commission=entry_commission,
+                 reason=("позиция зарегистрирована; RECOVERY: " + str(pos.recovery_source))
+                        if pos.state == PositionState.RECOVERY else "позиция зарегистрирована",
+                 source=source or "register_executed_buy",
+
+--- a/order_ledger.py	2026-11-25 13:30:21.663598291 +0000
++++ b/order_ledger.py	2026-11-25 13:36:36.938635418 +0000
+@@ -44,6 +44,10 @@
+     "avg_exec_price", "reason", "source", "error", "created_at_utc", "updated_at_utc",
+     # ЭТАП 5Б: добавлены В КОНЕЦ — старые записи читаются без ошибок.
+     "exchange_order_id", "order_request_id",
++    # BUY ACCOUNTING AUDIT (v1, FIX-2): фактическая комиссия BUY-исполнения
++    # persists в реестре; добавлена В КОНЕЦ — обратная совместимость
++    # со старыми журналами (у старых записей поле None).
++    "commission",
+ ]
+ IDENTITY_FIELDS = ("order_id", "trade_id", "figi", "side", "requested_lots")
+ 
+@@ -165,7 +169,7 @@
+         prev = self._latest.get(oid) if oid is not None else None
+         now = utc_now_iso()
+         record = {"record_type": "ORDER_STATUS", "timestamp_utc": now, "status": str(status), "order_id": oid}
+-        for key in ("trade_id", "figi", "ticker", "side", "requested_lots", "executed_lots", "lots_left", "avg_exec_price", "reason", "source", "error"):
++        for key in ("trade_id", "figi", "ticker", "side", "requested_lots", "executed_lots", "lots_left", "avg_exec_price", "commission", "reason", "source", "error"):
+             value = fields.get(key)
+             if value is None and prev is not None and key in ("trade_id", "figi", "ticker", "side", "requested_lots"):
+                 value = prev.get(key)
+@@ -196,6 +200,55 @@
+                 record["executed_lots"] = prev.get("executed_lots") or 0
+         record["created_at_utc"] = (prev or {}).get("created_at_utc") or now
+         record["updated_at_utc"] = now
++        # === BUY ACCOUNTING AUDIT (v1, FIX-1) ===
++        # Повторный отчёт ТОЙ ЖЕ заявки (тот же order_id) не может молча:
++        #   * перезаписать идентичность заявки (FIGI/сторона) — смешение
++        #     двух заявок одного order_id запрещено;
++        #   * затереть ранее подтверждённую цену исполнения/комиссию
++        #     ОТСУТСТВИЕМ данных в новом отчёте (обогащение, не потеря).
++        # Противоречивая цена/комиссия — конфликт ТОЛЬКО для повторного
++        # отчёта УЖЕ ТЕРМИНАЛЬНОЙ заявки (исполнение заморожено, значения
++        # меняться не могут; семантика B2 apply_close_execution). Между
++        # нетерминальными отчётами средняя цена/комиссия кумулятивного
++        # исполнения ЛЕГИТИМНО уточняются (частичные исполнения по разным
++        # ценам) — обновление принимается. Конфликт -> UNCERTAIN с
++        # СОХРАНЕНИЕМ прежней идентичности/значений (подлинное состояние
++        # не теряется, противоречие остаётся видимым).
++        if prev is not None:
++            _meta_conflicts = []
++            for _k in ("figi", "side"):
++                _new = fields.get(_k)
++                _old = prev.get(_k)
++                if (_new is not None and _old is not None
++                        and str(_new) != str(_old)):
++                    _meta_conflicts.append(f"{_k} {_old}->{_new}")
++                    record[_k] = _old
++            _prev_terminal = prev.get("status") in TERMINAL_STATUSES
++            for _k in ("avg_exec_price", "commission"):
++                _new = fields.get(_k)
++                _old = prev.get(_k)
++                if _new is None:
++                    # отсутствие данных в повторном отчёте НЕ затирает
++                    # ранее подтверждённое значение
++                    if _old is not None:
++                        record[_k] = _old
++                    continue
++                if _old is None or not _prev_terminal:
++                    continue
++                try:
++                    _fo, _fn = float(_old), float(_new)
++                except (TypeError, ValueError):
++                    _meta_conflicts.append(f"{_k} {_old}->{_new}")
++                    record[_k] = _old
++                    continue
++                if abs(_fo - _fn) > 1e-9:
++                    _meta_conflicts.append(f"{_k} {_old}->{_new}")
++                    record[_k] = _old
++            if _meta_conflicts:
++                record["status"] = STATUS_UNCERTAIN
++                record["reason"] = (str(fields.get("reason") or "") +
++                    "; identity/metadata contradiction of repeat report: " +
++                    ", ".join(_meta_conflicts)).strip("; ")
+         if not self._append_raw(record):
+             return False
+         if oid is not None:
+@@ -228,7 +281,8 @@
+                     executed_lots: int = None, avg_exec_price: float = None,
+                     status_hint: str = None, reason: str = "", source: str = "post_response",
+                     error: str = None,
+-                    exchange_order_id: str = None, order_request_id: str = None) -> bool:
++                    exchange_order_id: str = None, order_request_id: str = None,
++                    commission: float = None) -> bool:
+         status = STATUS_SENT if status_hint is None else status_hint
+         if status == STATUS_FILL:
+             try:
+@@ -243,28 +297,35 @@
+                            side=side, requested_lots=requested_lots, executed_lots=executed_lots,
+                            avg_exec_price=avg_exec_price, reason=reason, source=source, error=error,
+                            exchange_order_id=exchange_order_id,
+-                           order_request_id=order_request_id)
++                           order_request_id=order_request_id,
++                           commission=commission)
+ 
+     def record_status(self, order_id: str, status: str, *, trade_id: str = None,
+                       figi: str = None, ticker: str = None, side: str = None,
+                       requested_lots: int = None, executed_lots: int = None,
+                       lots_left: int = None, avg_exec_price: float = None,
+                       reason: str = "", source: str = "", error: str = None,
+-                      exchange_order_id: str = None, order_request_id: str = None) -> bool:
++                      exchange_order_id: str = None, order_request_id: str = None,
++                      commission: float = None) -> bool:
++        # BUY ACCOUNTING AUDIT (v1, FIX-2): commission — фактическая комиссия
++        # исполнения (persist в реестре; наследование/конфликт — в append).
+         return self.append(status, order_id, trade_id=trade_id, figi=figi, ticker=ticker,
+             side=side, requested_lots=requested_lots, executed_lots=executed_lots,
+             lots_left=lots_left, avg_exec_price=avg_exec_price, reason=reason, source=source, error=error,
+-            exchange_order_id=exchange_order_id, order_request_id=order_request_id)
++            exchange_order_id=exchange_order_id, order_request_id=order_request_id,
++            commission=commission)
+ 
+     def record_uncertain(self, order_id: str, *, trade_id: str = None, figi: str = None,
+                          ticker: str = None, side: str = None, requested_lots: int = None,
+                          executed_lots: int = None, avg_exec_price: float = None,
+                          reason: str = "", source: str = "", error: str = None,
+-                         exchange_order_id: str = None, order_request_id: str = None) -> bool:
++                         exchange_order_id: str = None, order_request_id: str = None,
++                         commission: float = None) -> bool:
+         return self.append(STATUS_UNCERTAIN, order_id, trade_id=trade_id, figi=figi,
+             ticker=ticker, side=side, requested_lots=requested_lots, executed_lots=executed_lots,
+             avg_exec_price=avg_exec_price, reason=reason, source=source, error=error,
+-            exchange_order_id=exchange_order_id, order_request_id=order_request_id)
++            exchange_order_id=exchange_order_id, order_request_id=order_request_id,
++            commission=commission)
+ 
+     # ---- New exact per-order cumulative execution / apply protocol ----
+     def record_observation(self, order_id: str, *, executed_lots: int, status: str,
+
+--- a/test_commission.py	2026-11-25 13:30:21.666598299 +0000
++++ b/test_commission.py	2026-11-25 13:37:40.964813016 +0000
+@@ -1,85 +1,94 @@
+-# tests/test_commission.py
+-# Tsclp_v2.2_volatile — тесты извлечения комиссии из OrderState.
+-# Контракт: если executed_commission есть и > 0 → факт; иначе None (модель).
+-# Обновлено: _extract_price(state, lots_executed, lot_size).
+-
+-import pytest
+-from execution import ExecutionMonitor
+-
+-
+-class FakeMoney:
+-    def __init__(self, units, nano):
+-        self.units = units
+-        self.nano = nano
+-
+-
+-class FakeState:
+-    def __init__(self, commission=None, price=None, lots=1, status=1):
+-        self.executed_commission = commission
+-        self.executed_order_price = price
+-        self.lots_executed = lots
+-        self.execution_report_status = status
+-
+-
+-def test_extract_commission_positive():
+-    st = FakeState(commission=FakeMoney(1, 500_000_000))  # 1.5
+-    assert ExecutionMonitor._extract_commission(st) == pytest.approx(1.5)
+-
+-
+-def test_extract_commission_zero_units_but_nano():
+-    st = FakeState(commission=FakeMoney(0, 250_000_000))  # 0.25
+-    assert ExecutionMonitor._extract_commission(st) == pytest.approx(0.25)
+-
+-
+-def test_extract_commission_none_returns_none():
+-    st = FakeState(commission=None)
+-    assert ExecutionMonitor._extract_commission(st) is None
+-
+-
+-def test_extract_commission_zero_returns_none():
+-    st = FakeState(commission=FakeMoney(0, 0))
+-    assert ExecutionMonitor._extract_commission(st) is None
+-
+-
+-def test_extract_commission_negative_nano_abs():
+-    st = FakeState(commission=FakeMoney(0, -300_000_000))  # -0.3
+-    assert ExecutionMonitor._extract_commission(st) == pytest.approx(0.3)
+-
+-
+-def test_extract_commission_missing_attr_returns_none():
+-    class Broken:
+-        pass
+-    assert ExecutionMonitor._extract_commission(Broken()) is None
+-
+-
+-def test_extract_commission_broken_money_no_units():
+-    class BrokenMoney:
+-        pass
+-
+-    class State:
+-        executed_commission = BrokenMoney()
+-
+-    assert ExecutionMonitor._extract_commission(State()) is None
+-
+-
+-def test_extract_commission_and_price_independent():
+-    """Комиссия есть, цены нет — оба извлекаются независимо."""
+-    st = FakeState(commission=FakeMoney(2, 0), price=None, lots=1)
+-    assert ExecutionMonitor._extract_commission(st) == pytest.approx(2.0)
+-    assert ExecutionMonitor._extract_price(st, 1, 1) is None  # lot_size=1
+-
+-
+-def test_extract_price_with_commission_present():
+-    """Цена есть, комиссия есть — оба извлекаются."""
+-    st = FakeState(
+-        commission=FakeMoney(1, 0),
+-        price=FakeMoney(300, 0),
+-        lots=1,
+-    )
+-    assert ExecutionMonitor._extract_price(st, 1, 1) == pytest.approx(300.0)  # lot_size=1
+-    assert ExecutionMonitor._extract_commission(st) == pytest.approx(1.0)
+-
+-
+-def test_extract_commission_large_value():
+-    st = FakeState(commission=FakeMoney(1234, 560_000_000))  # 1234.56
++# tests/test_commission.py
++# Tsclp_v2.2_volatile — тесты извлечения комиссии из OrderState.
++# Контракт (обновлён BUY ACCOUNTING AUDIT v1, FIX-3): если
++# executed_commission ПРИСУТСТВУЕТ — возвращается его значение (включая
++# достоверный НОЛЬ: commission=0 отличается от отсутствующего значения);
++# None — только когда поле отсутствует/некорректно. Прежний контракт
++# («0 -> None») трактовал нулевую комиссию как отсутствие данных и
++# подменял её модельной — дефект по ТЗ-E BUY-аудита.
++# Обновлено: _extract_price(state, lots_executed, lot_size).
++
++import pytest
++from execution import ExecutionMonitor
++
++
++class FakeMoney:
++    def __init__(self, units, nano):
++        self.units = units
++        self.nano = nano
++
++
++class FakeState:
++    def __init__(self, commission=None, price=None, lots=1, status=1):
++        self.executed_commission = commission
++        self.executed_order_price = price
++        self.lots_executed = lots
++        self.execution_report_status = status
++
++
++def test_extract_commission_positive():
++    st = FakeState(commission=FakeMoney(1, 500_000_000))  # 1.5
++    assert ExecutionMonitor._extract_commission(st) == pytest.approx(1.5)
++
++
++def test_extract_commission_zero_units_but_nano():
++    st = FakeState(commission=FakeMoney(0, 250_000_000))  # 0.25
++    assert ExecutionMonitor._extract_commission(st) == pytest.approx(0.25)
++
++
++def test_extract_commission_none_returns_none():
++    st = FakeState(commission=None)
++    assert ExecutionMonitor._extract_commission(st) is None
++
++
++def test_extract_commission_zero_returns_zero():
++    """BUY ACCOUNTING AUDIT v1 (FIX-3): commission=0 — ДОСТОВЕРНОЕ значение
++    («комиссия реально нулевая»), отличимое от отсутствующего (None).
++    Прежнее ожидание «0 -> None» фиксировало дефект ТЗ-E и обновлено
++    (см. CHANGED_FILES.md BUY-аудита)."""
++    st = FakeState(commission=FakeMoney(0, 0))
++    assert ExecutionMonitor._extract_commission(st) == 0.0
++
++
++def test_extract_commission_negative_nano_abs():
++    st = FakeState(commission=FakeMoney(0, -300_000_000))  # -0.3
++    assert ExecutionMonitor._extract_commission(st) == pytest.approx(0.3)
++
++
++def test_extract_commission_missing_attr_returns_none():
++    class Broken:
++        pass
++    assert ExecutionMonitor._extract_commission(Broken()) is None
++
++
++def test_extract_commission_broken_money_no_units():
++    class BrokenMoney:
++        pass
++
++    class State:
++        executed_commission = BrokenMoney()
++
++    assert ExecutionMonitor._extract_commission(State()) is None
++
++
++def test_extract_commission_and_price_independent():
++    """Комиссия есть, цены нет — оба извлекаются независимо."""
++    st = FakeState(commission=FakeMoney(2, 0), price=None, lots=1)
++    assert ExecutionMonitor._extract_commission(st) == pytest.approx(2.0)
++    assert ExecutionMonitor._extract_price(st, 1, 1) is None  # lot_size=1
++
++
++def test_extract_price_with_commission_present():
++    """Цена есть, комиссия есть — оба извлекаются."""
++    st = FakeState(
++        commission=FakeMoney(1, 0),
++        price=FakeMoney(300, 0),
++        lots=1,
++    )
++    assert ExecutionMonitor._extract_price(st, 1, 1) == pytest.approx(300.0)  # lot_size=1
++    assert ExecutionMonitor._extract_commission(st) == pytest.approx(1.0)
++
++
++def test_extract_commission_large_value():
++    st = FakeState(commission=FakeMoney(1234, 560_000_000))  # 1234.56
+     assert ExecutionMonitor._extract_commission(st) == pytest.approx(1234.56)
+\ No newline at end of file
+
+--- a/tests/test_commission.py	2026-11-25 13:30:21.669598308 +0000
++++ b/tests/test_commission.py	2026-11-25 13:37:40.971813035 +0000
+@@ -1,85 +1,94 @@
+-# tests/test_commission.py
+-# Tsclp_v2.2_volatile — тесты извлечения комиссии из OrderState.
+-# Контракт: если executed_commission есть и > 0 → факт; иначе None (модель).
+-# Обновлено: _extract_price(state, lots_executed, lot_size).
+-
+-import pytest
+-from execution import ExecutionMonitor
+-
+-
+-class FakeMoney:
+-    def __init__(self, units, nano):
+-        self.units = units
+-        self.nano = nano
+-
+-
+-class FakeState:
+-    def __init__(self, commission=None, price=None, lots=1, status=1):
+-        self.executed_commission = commission
+-        self.executed_order_price = price
+-        self.lots_executed = lots
+-        self.execution_report_status = status
+-
+-
+-def test_extract_commission_positive():
+-    st = FakeState(commission=FakeMoney(1, 500_000_000))  # 1.5
+-    assert ExecutionMonitor._extract_commission(st) == pytest.approx(1.5)
+-
+-
+-def test_extract_commission_zero_units_but_nano():
+-    st = FakeState(commission=FakeMoney(0, 250_000_000))  # 0.25
+-    assert ExecutionMonitor._extract_commission(st) == pytest.approx(0.25)
+-
+-
+-def test_extract_commission_none_returns_none():
+-    st = FakeState(commission=None)
+-    assert ExecutionMonitor._extract_commission(st) is None
+-
+-
+-def test_extract_commission_zero_returns_none():
+-    st = FakeState(commission=FakeMoney(0, 0))
+-    assert ExecutionMonitor._extract_commission(st) is None
+-
+-
+-def test_extract_commission_negative_nano_abs():
+-    st = FakeState(commission=FakeMoney(0, -300_000_000))  # -0.3
+-    assert ExecutionMonitor._extract_commission(st) == pytest.approx(0.3)
+-
+-
+-def test_extract_commission_missing_attr_returns_none():
+-    class Broken:
+-        pass
+-    assert ExecutionMonitor._extract_commission(Broken()) is None
+-
+-
+-def test_extract_commission_broken_money_no_units():
+-    class BrokenMoney:
+-        pass
+-
+-    class State:
+-        executed_commission = BrokenMoney()
+-
+-    assert ExecutionMonitor._extract_commission(State()) is None
+-
+-
+-def test_extract_commission_and_price_independent():
+-    """Комиссия есть, цены нет — оба извлекаются независимо."""
+-    st = FakeState(commission=FakeMoney(2, 0), price=None, lots=1)
+-    assert ExecutionMonitor._extract_commission(st) == pytest.approx(2.0)
+-    assert ExecutionMonitor._extract_price(st, 1, 1) is None  # lot_size=1
+-
+-
+-def test_extract_price_with_commission_present():
+-    """Цена есть, комиссия есть — оба извлекаются."""
+-    st = FakeState(
+-        commission=FakeMoney(1, 0),
+-        price=FakeMoney(300, 0),
+-        lots=1,
+-    )
+-    assert ExecutionMonitor._extract_price(st, 1, 1) == pytest.approx(300.0)  # lot_size=1
+-    assert ExecutionMonitor._extract_commission(st) == pytest.approx(1.0)
+-
+-
+-def test_extract_commission_large_value():
+-    st = FakeState(commission=FakeMoney(1234, 560_000_000))  # 1234.56
++# tests/test_commission.py
++# Tsclp_v2.2_volatile — тесты извлечения комиссии из OrderState.
++# Контракт (обновлён BUY ACCOUNTING AUDIT v1, FIX-3): если
++# executed_commission ПРИСУТСТВУЕТ — возвращается его значение (включая
++# достоверный НОЛЬ: commission=0 отличается от отсутствующего значения);
++# None — только когда поле отсутствует/некорректно. Прежний контракт
++# («0 -> None») трактовал нулевую комиссию как отсутствие данных и
++# подменял её модельной — дефект по ТЗ-E BUY-аудита.
++# Обновлено: _extract_price(state, lots_executed, lot_size).
++
++import pytest
++from execution import ExecutionMonitor
++
++
++class FakeMoney:
++    def __init__(self, units, nano):
++        self.units = units
++        self.nano = nano
++
++
++class FakeState:
++    def __init__(self, commission=None, price=None, lots=1, status=1):
++        self.executed_commission = commission
++        self.executed_order_price = price
++        self.lots_executed = lots
++        self.execution_report_status = status
++
++
++def test_extract_commission_positive():
++    st = FakeState(commission=FakeMoney(1, 500_000_000))  # 1.5
++    assert ExecutionMonitor._extract_commission(st) == pytest.approx(1.5)
++
++
++def test_extract_commission_zero_units_but_nano():
++    st = FakeState(commission=FakeMoney(0, 250_000_000))  # 0.25
++    assert ExecutionMonitor._extract_commission(st) == pytest.approx(0.25)
++
++
++def test_extract_commission_none_returns_none():
++    st = FakeState(commission=None)
++    assert ExecutionMonitor._extract_commission(st) is None
++
++
++def test_extract_commission_zero_returns_zero():
++    """BUY ACCOUNTING AUDIT v1 (FIX-3): commission=0 — ДОСТОВЕРНОЕ значение
++    («комиссия реально нулевая»), отличимое от отсутствующего (None).
++    Прежнее ожидание «0 -> None» фиксировало дефект ТЗ-E и обновлено
++    (см. CHANGED_FILES.md BUY-аудита)."""
++    st = FakeState(commission=FakeMoney(0, 0))
++    assert ExecutionMonitor._extract_commission(st) == 0.0
++
++
++def test_extract_commission_negative_nano_abs():
++    st = FakeState(commission=FakeMoney(0, -300_000_000))  # -0.3
++    assert ExecutionMonitor._extract_commission(st) == pytest.approx(0.3)
++
++
++def test_extract_commission_missing_attr_returns_none():
++    class Broken:
++        pass
++    assert ExecutionMonitor._extract_commission(Broken()) is None
++
++
++def test_extract_commission_broken_money_no_units():
++    class BrokenMoney:
++        pass
++
++    class State:
++        executed_commission = BrokenMoney()
++
++    assert ExecutionMonitor._extract_commission(State()) is None
++
++
++def test_extract_commission_and_price_independent():
++    """Комиссия есть, цены нет — оба извлекаются независимо."""
++    st = FakeState(commission=FakeMoney(2, 0), price=None, lots=1)
++    assert ExecutionMonitor._extract_commission(st) == pytest.approx(2.0)
++    assert ExecutionMonitor._extract_price(st, 1, 1) is None  # lot_size=1
++
++
++def test_extract_price_with_commission_present():
++    """Цена есть, комиссия есть — оба извлекаются."""
++    st = FakeState(
++        commission=FakeMoney(1, 0),
++        price=FakeMoney(300, 0),
++        lots=1,
++    )
++    assert ExecutionMonitor._extract_price(st, 1, 1) == pytest.approx(300.0)  # lot_size=1
++    assert ExecutionMonitor._extract_commission(st) == pytest.approx(1.0)
++
++
++def test_extract_commission_large_value():
++    st = FakeState(commission=FakeMoney(1234, 560_000_000))  # 1234.56
+     assert ExecutionMonitor._extract_commission(st) == pytest.approx(1234.56)
+\ No newline at end of file
