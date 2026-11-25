@@ -1,0 +1,20 @@
+--- temp_repo/samsung_B2_integrated_v1_v7/execution.py	2026-11-25 15:03:49.657739817 +0000
++++ temp_repo/Samsung_BUY_Accounting_Audit_V1/execution.py	2026-11-25 15:03:49.621739682 +0000
+@@ -1256,12 +1256,16 @@
+ 
+     @staticmethod
+     def _extract_commission(state):
++        # BUY ACCOUNTING AUDIT (v1, FIX-3): commission = 0.0 — ДОСТОВЕРНОЕ
++        # значение брокера («комиссия реально нулевая»), оно отличается от
++        # отсутствующего значения (None). Прежнее поведение (0 -> None)
++        # теряло факт нулевой комиссии и подменяло её модельной.
+         try:
+             ec = getattr(state, "executed_commission", None)
+             if ec is None:
+                 return None
+             value = abs(float(ec.units) + float(ec.nano) / 1e9)
+-            return value if value > 0 else None
++            return value
+         except Exception:
+             return None
+ 
