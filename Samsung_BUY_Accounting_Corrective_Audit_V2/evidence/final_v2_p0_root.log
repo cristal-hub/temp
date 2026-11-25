@@ -1,0 +1,70 @@
+....................................F.................................   [100%]
+=================================== FAILURES ===================================
+E   AssertionError: assert ('UNCERTAIN' == 'CANCELLED'
+      
+      - CANCELLED
+      + UNCERTAIN)
+----------------------------- Captured stderr call -----------------------------
+2026-11-25 16:36:33,971 - INFO - [reconcile] Позиций нет (достоверно).
+2026-11-25 16:36:33,972 - ERROR - TEST: ЧАСТИЧНОЕ исполнение покупки — отмена остатка (order_id=560cea44-b865-43fa-8f03-b9ed8e7540a8)
+2026-11-25 16:36:33,973 - WARNING - TEST: остаток отменён, портфель пока не показывает позицию, но брокер подтвердил 2 исполненных лот — регистрация (Дефект №1)
+2026-11-25 16:36:33,973 - WARNING - [execution] RECOVERY TEST qty=2 source=no_price
+2026-11-25 16:36:33,973 - INFO - [notify] ⚠️ <b>TEST</b> BUY исполнен (2 лот.), цена входа/SL/TP уточняются
+Позиция зарегистрирована как RECOVERY — контроль сохранён, автозакрытие отключено.
+2026-11-25 16:36:33,974 - WARNING - [register] TEST: активная позиция уже есть (state=RECOVERY, order=560cea44-b865-43fa-8f03-b9ed8e7540a8) — дубль не создаётся (order_id=560cea44-b865-43fa-8f03-b9ed8e7540a8)
+2026-11-25 16:36:33,974 - INFO - [recovery] TEST: заявка 560cea44-b865-43fa-8f03-b9ed8e7540a8 ещё активна (status=NEW) — возможны дополнительные исполнения, промоция отложена до терминального статуса
+2026-11-25 16:36:33,974 - INFO - [reconcile] Все позиции совпадают (1 активных).
+2026-11-25 16:36:33,975 - INFO - TEST: позиция уже открыта/в неопределённости, пропуск
+2026-11-25 16:36:33,975 - WARNING - [poll] TEST: заявка 560cea44-b865-43fa-8f03-b9ed8e7540a8 CANCELLED с частичным исполнением 2 лот — регистрирую исполненную часть (статус заявки сохраняется как CANCELLED)
+2026-11-25 16:36:33,975 - WARNING - [register] TEST: активная позиция уже есть (state=RECOVERY, order=560cea44-b865-43fa-8f03-b9ed8e7540a8) — дубль не создаётся (order_id=560cea44-b865-43fa-8f03-b9ed8e7540a8)
+2026-11-25 16:36:33,975 - WARNING - [recovery] TEST: RECOVERY→OPEN entry=100.0000 SL=95.0000 TP=110.0000 qty=2
+2026-11-25 16:36:33,976 - INFO - [notify] ✅ <b>TEST</b>: RECOVERY разрешена
+Цена входа: 100.0000
+SL: 95.0000
+TP: 110.0000
+Лотов: 2 — позиция под штатным контролем.
+2026-11-25 16:36:33,976 - INFO - [reconcile] Все позиции совпадают (1 активных).
+2026-11-25 16:36:33,976 - INFO - TEST: позиция уже открыта/в неопределённости, пропуск
+2026-11-25 16:36:33,977 - WARNING - [poll] TEST: заявка 560cea44-b865-43fa-8f03-b9ed8e7540a8 CANCELLED с частичным исполнением 5 лот — регистрирую исполненную часть (статус заявки сохраняется как CANCELLED)
+2026-11-25 16:36:33,977 - WARNING - [register] TEST: активная позиция уже есть (state=OPEN, order=560cea44-b865-43fa-8f03-b9ed8e7540a8) — дубль не создаётся (order_id=560cea44-b865-43fa-8f03-b9ed8e7540a8)
+2026-11-25 16:36:33,977 - INFO - [notify] ⚠️ <b>TEST</b>: позднее исполнение входной заявки
+Добавлено лотов: +3 (итого 5)
+Цена входа: 100.0000 (не менялась)
+SL: 95.0000
+TP: 110.0000 — сохранены
+2026-11-25 16:36:33,977 - INFO - [reconcile] Все позиции совпадают (1 активных).
+2026-11-25 16:36:33,977 - INFO - TEST: позиция уже открыта/в неопределённости, пропуск
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2197 [reconcile] Позиций нет (достоверно).
+ERROR    root:main.py:5352 TEST: ЧАСТИЧНОЕ исполнение покупки — отмена остатка (order_id=560cea44-b865-43fa-8f03-b9ed8e7540a8)
+WARNING  root:main.py:5436 TEST: остаток отменён, портфель пока не показывает позицию, но брокер подтвердил 2 исполненных лот — регистрация (Дефект №1)
+WARNING  root:execution.py:530 [execution] RECOVERY TEST qty=2 source=no_price
+INFO     root:main.py:900 [notify] ⚠️ <b>TEST</b> BUY исполнен (2 лот.), цена входа/SL/TP уточняются
+Позиция зарегистрирована как RECOVERY — контроль сохранён, автозакрытие отключено.
+WARNING  root:main.py:3595 [register] TEST: активная позиция уже есть (state=RECOVERY, order=560cea44-b865-43fa-8f03-b9ed8e7540a8) — дубль не создаётся (order_id=560cea44-b865-43fa-8f03-b9ed8e7540a8)
+INFO     root:main.py:4698 [recovery] TEST: заявка 560cea44-b865-43fa-8f03-b9ed8e7540a8 ещё активна (status=NEW) — возможны дополнительные исполнения, промоция отложена до терминального статуса
+INFO     root:main.py:2199 [reconcile] Все позиции совпадают (1 активных).
+INFO     root:main.py:5227 TEST: позиция уже открыта/в неопределённости, пропуск
+WARNING  root:main.py:4407 [poll] TEST: заявка 560cea44-b865-43fa-8f03-b9ed8e7540a8 CANCELLED с частичным исполнением 2 лот — регистрирую исполненную часть (статус заявки сохраняется как CANCELLED)
+WARNING  root:main.py:3595 [register] TEST: активная позиция уже есть (state=RECOVERY, order=560cea44-b865-43fa-8f03-b9ed8e7540a8) — дубль не создаётся (order_id=560cea44-b865-43fa-8f03-b9ed8e7540a8)
+WARNING  root:main.py:4796 [recovery] TEST: RECOVERY→OPEN entry=100.0000 SL=95.0000 TP=110.0000 qty=2
+INFO     root:main.py:900 [notify] ✅ <b>TEST</b>: RECOVERY разрешена
+Цена входа: 100.0000
+SL: 95.0000
+TP: 110.0000
+Лотов: 2 — позиция под штатным контролем.
+INFO     root:main.py:2199 [reconcile] Все позиции совпадают (1 активных).
+INFO     root:main.py:5227 TEST: позиция уже открыта/в неопределённости, пропуск
+WARNING  root:main.py:4407 [poll] TEST: заявка 560cea44-b865-43fa-8f03-b9ed8e7540a8 CANCELLED с частичным исполнением 5 лот — регистрирую исполненную часть (статус заявки сохраняется как CANCELLED)
+WARNING  root:main.py:3595 [register] TEST: активная позиция уже есть (state=OPEN, order=560cea44-b865-43fa-8f03-b9ed8e7540a8) — дубль не создаётся (order_id=560cea44-b865-43fa-8f03-b9ed8e7540a8)
+INFO     root:main.py:900 [notify] ⚠️ <b>TEST</b>: позднее исполнение входной заявки
+Добавлено лотов: +3 (итого 5)
+Цена входа: 100.0000 (не менялась)
+SL: 95.0000
+TP: 110.0000 — сохранены
+INFO     root:main.py:2199 [reconcile] Все позиции совпадают (1 активных).
+INFO     root:main.py:5227 TEST: позиция уже открыта/в неопределённости, пропуск
+/home/z/my-project/audit_v2/FINAL/test_p0_batch2_late_execution.py:470: AssertionError: assert ('UNCERTAIN' == 'CANCELLED'
+=========================== short test summary info ============================
+FAILED test_p0_batch2_late_execution.py::test_integration_trading_cycle_partial_cancel_recovery_open_late_lots
+1 failed, 69 passed in 0.79s

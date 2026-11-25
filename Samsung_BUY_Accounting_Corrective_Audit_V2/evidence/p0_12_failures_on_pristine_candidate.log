@@ -1,0 +1,1474 @@
+=== ENV ===
+Python 3.12.16
+pytest 9.0.2
+cwd: /home/z/my-project/audit_v2/BASELINE
+command: python3 -m pytest test_p0_batch2_late_execution.py test_p0_sell_id_fixes.py -q --tb=long --continue-on-collection-errors
+=== RUN ===
+.FF....F.FFF.F.FFFF...............F........                              [100%]
+=================================== FAILURES ===================================
+____________________ test_n1_no_premotion_while_order_alive ____________________
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_n1_no_premotion_while_ord0'))
+
+    @pytest.mark.asyncio
+    async def test_n1_no_premotion_while_order_alive(env):
+        """RECOVERY не повышается до OPEN, пока входная заявка активна
+        (PARTIALLYFILL): возможны дополнительные исполнения. Цена, уже видная
+        у живой заявки, не является основанием для промоции."""
+        ledger = make_ledger(env.tmp_path)
+        client = FakeClient(positions={FIGI: PositionData(lots=2, direction="LONG",
+                                                          raw_shares=Decimal(2))})
+        oid = "oid-alive"
+        monitor = ExecutionMonitor(client)
+        pos = monitor.register_recovery(figi=FIGI, ticker=TICKER, direction="BUY",
+                                        quantity=2, lot_size=1, order_id=oid,
+                                        recovery_source="no_price")
+    
+        # у живой заявки УЖЕ есть цена исполнения — промоция всё равно запрещена
+        client.order_states[oid] = fake_state(PARTIALLYFILL, lots_executed=2, price_units=200)
+>       await main.promote_recovery_positions(client, monitor, FakeRM())
+
+test_p0_batch2_late_execution.py:131: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87774410>
+monitor = <execution.ExecutionMonitor object at 0x7f3e877745f0>
+rm = <tests.test_p0_defect_fixes.FakeRM object at 0x7f3e87774b30>, ledger = None
+
+    async def promote_recovery_positions(client: TinkoffClient, monitor: ExecutionMonitor,
+                                         rm: RiskManager,
+                                         ledger: Optional[OrderLedger] = None):
+        """
+        Восстановление цены входа для RECOVERY-позиций (этап 5).
+    
+        Если у позиции есть entry_order_id — запрашивается статус заявки; при
+        ТЕРМИНАЛЬНОМ статусе заявки (партия P0-2: только FILL/CANCELLED/REJECTED/
+        EXPIRED — пока заявка жива (NEW/PARTIALLYFILL), возможны дополнительные
+        исполнения и промоция зафиксировала бы неполное количество) и появлении
+        цены исполнения загружаются свечи, SL/TP рассчитываются штатной
+        стратегией, позиция переводится в OPEN.
+    
+        Партия P0-3: финальное накопительное lots_executed входной заявки — это
+        НЕ остаток позиции у брокера. Оно НЕ подставляется в quantity через
+        sync_recovery_quantity (тот предназначен для достоверных снимков
+        портфеля): обрабатывается record_recovery_entry_lots — обновляются
+        счётчики исполнения, в позицию добавляются только ДЕЙСТВИТЕЛЬНО новые
+        лоты (сверх учтённых и сверх уже виденных у этой заявки по реестру).
+        Устаревший меньший lots_executed — противоречие: промоция откладывается,
+        количество не уменьшается, фиксируется неопределённость. Остаток позиции
+        остаётся равным последнему достоверно подтверждённому брокерскому
+        остатку (сверка/адопция).
+    
+        Позиция БЕЗ order_id (адоптированная из reconcile/старта) остаётся в
+        RECOVERY под контролем оператора: цена не заменяется произвольной,
+        автоматическое закрытие ЗАПРЕЩЕНО.
+    
+        Партия P0-4: рост lots_executed ПОСЛЕ достоверной синхронизации остатка
+        снимком портфеля (entry_snapshot_synced) — неоднозначен: дельта к
+        остатку не добавляется (снимок мог уже учесть исполнение), счётчики
+        догоняются по отчёту заявки, промоция ОТКЛАДЫВАЕТСЯ до сверки —
+        RECOVERY -> OPEN выполняется только с остатком, подтверждённым
+        достоверным снимком брокерского портфеля.
+        """
+        for pos in list(monitor.positions.values()):
+            if pos.state != PositionState.RECOVERY:
+                continue
+            if not pos.entry_order_id:
+                # Пакет В4: автопривязка адоптированной RECOVERY-позиции к
+                # единственному терминальному BUY-отчёту по FIGI с
+                # executed_lots == quantity. Не удалось — прежнее поведение
+                # (цена не восстанавливается автоматически, решение за оператором).
+                if not _try_bind_recovery_entry(monitor, rm, ledger, pos):
+                    _promote_throttle["n"] += 1
+                    if _promote_throttle["n"] % 20 == 1:
+                        logging.warning(
+                            f"[recovery] {pos.ticker}: RECOVERY без order_id "
+                            f"(source={pos.recovery_source}) — цена входа не восстанавливается "
+                            f"автоматически; закрытие только вручную оператором"
+                        )
+                    continue
+                # привязка выполнена — промоция продолжается в этом же цикле
+            if pos.direction != "BUY":
+                # Партия P0-3: накопительное исполнение входной BUY-заявки
+                # применимо только к BUY (LONG)-позициям. SHORT-RECOVERY остаётся
+                # под контролем оператора/сверки (количество — только по
+                # достоверным снимкам брокера).
+                _promote_throttle["alive"] += 1
+                if _promote_throttle["alive"] % 20 == 1:
+                    logging.warning(
+                        f"[recovery] {pos.ticker}: SHORT-RECOVERY с order_id — "
+                        f"промоция по отчёту входной заявки не выполняется"
+                    )
+                continue
+    
+            # entry_order_id — клиентский UUID входной BUY-заявки робота
+            # (ЭТАП 5Б): опрос строго по ORDER_ID_TYPE_REQUEST.
+>           state = await client.get_sandbox_order_state(pos.entry_order_id, order_id_type="REQUEST")
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: FakeClient.get_sandbox_order_state() got an unexpected keyword argument 'order_id_type'
+
+main.py:4624: TypeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-25 16:16:00,660 - WARNING - [execution] RECOVERY TEST qty=2 source=no_price
+------------------------------ Captured log call -------------------------------
+WARNING  root:execution.py:530 [execution] RECOVERY TEST qty=2 source=no_price
+___________ test_n1_promotion_only_at_terminal_syncs_final_quantity ____________
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_n1_promotion_only_at_term0'))
+
+    @pytest.mark.asyncio
+    async def test_n1_promotion_only_at_terminal_syncs_final_quantity(env):
+        """При ТЕРМИНАЛЬНОМ статусе заявки промоция выполняется. Партия P0-3:
+        финальное накопительное lots_executed не подставляется в количество как
+        готовое значение — применяются только ДЕЙСТВИТЕЛЬНО новые лоты сверх
+        учтённых (2 учтено, исполнено 5 -> +3, итог 5). Проданные лоты при этом
+        не восстанавливаются: повторный ответ с тем же значением ничего не меняет
+        (см. test_p03_1)."""
+        ledger = make_ledger(env.tmp_path)
+        client = FakeClient(positions={})
+        oid = "oid-terminal"
+        monitor = ExecutionMonitor(client)
+        pos = monitor.register_recovery(figi=FIGI, ticker=TICKER, direction="BUY",
+                                        quantity=2, lot_size=1, order_id=oid,
+                                        recovery_source="no_price")
+    
+        # финальный отчёт: CANCELLED, исполнено 5 (больше известного 2),
+        # средняя цена 500 за 5 лотов = 100 за штуку
+        client.order_states[oid] = fake_state(CANCELLED, lots_executed=5, price_units=500)
+>       await main.promote_recovery_positions(client, monitor, FakeRM(sl=95.0, tp=110.0))
+
+test_p0_batch2_late_execution.py:160: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87777bc0>
+monitor = <execution.ExecutionMonitor object at 0x7f3e87777b00>
+rm = <tests.test_p0_defect_fixes.FakeRM object at 0x7f3e8777a300>, ledger = None
+
+    async def promote_recovery_positions(client: TinkoffClient, monitor: ExecutionMonitor,
+                                         rm: RiskManager,
+                                         ledger: Optional[OrderLedger] = None):
+        """
+        Восстановление цены входа для RECOVERY-позиций (этап 5).
+    
+        Если у позиции есть entry_order_id — запрашивается статус заявки; при
+        ТЕРМИНАЛЬНОМ статусе заявки (партия P0-2: только FILL/CANCELLED/REJECTED/
+        EXPIRED — пока заявка жива (NEW/PARTIALLYFILL), возможны дополнительные
+        исполнения и промоция зафиксировала бы неполное количество) и появлении
+        цены исполнения загружаются свечи, SL/TP рассчитываются штатной
+        стратегией, позиция переводится в OPEN.
+    
+        Партия P0-3: финальное накопительное lots_executed входной заявки — это
+        НЕ остаток позиции у брокера. Оно НЕ подставляется в quantity через
+        sync_recovery_quantity (тот предназначен для достоверных снимков
+        портфеля): обрабатывается record_recovery_entry_lots — обновляются
+        счётчики исполнения, в позицию добавляются только ДЕЙСТВИТЕЛЬНО новые
+        лоты (сверх учтённых и сверх уже виденных у этой заявки по реестру).
+        Устаревший меньший lots_executed — противоречие: промоция откладывается,
+        количество не уменьшается, фиксируется неопределённость. Остаток позиции
+        остаётся равным последнему достоверно подтверждённому брокерскому
+        остатку (сверка/адопция).
+    
+        Позиция БЕЗ order_id (адоптированная из reconcile/старта) остаётся в
+        RECOVERY под контролем оператора: цена не заменяется произвольной,
+        автоматическое закрытие ЗАПРЕЩЕНО.
+    
+        Партия P0-4: рост lots_executed ПОСЛЕ достоверной синхронизации остатка
+        снимком портфеля (entry_snapshot_synced) — неоднозначен: дельта к
+        остатку не добавляется (снимок мог уже учесть исполнение), счётчики
+        догоняются по отчёту заявки, промоция ОТКЛАДЫВАЕТСЯ до сверки —
+        RECOVERY -> OPEN выполняется только с остатком, подтверждённым
+        достоверным снимком брокерского портфеля.
+        """
+        for pos in list(monitor.positions.values()):
+            if pos.state != PositionState.RECOVERY:
+                continue
+            if not pos.entry_order_id:
+                # Пакет В4: автопривязка адоптированной RECOVERY-позиции к
+                # единственному терминальному BUY-отчёту по FIGI с
+                # executed_lots == quantity. Не удалось — прежнее поведение
+                # (цена не восстанавливается автоматически, решение за оператором).
+                if not _try_bind_recovery_entry(monitor, rm, ledger, pos):
+                    _promote_throttle["n"] += 1
+                    if _promote_throttle["n"] % 20 == 1:
+                        logging.warning(
+                            f"[recovery] {pos.ticker}: RECOVERY без order_id "
+                            f"(source={pos.recovery_source}) — цена входа не восстанавливается "
+                            f"автоматически; закрытие только вручную оператором"
+                        )
+                    continue
+                # привязка выполнена — промоция продолжается в этом же цикле
+            if pos.direction != "BUY":
+                # Партия P0-3: накопительное исполнение входной BUY-заявки
+                # применимо только к BUY (LONG)-позициям. SHORT-RECOVERY остаётся
+                # под контролем оператора/сверки (количество — только по
+                # достоверным снимкам брокера).
+                _promote_throttle["alive"] += 1
+                if _promote_throttle["alive"] % 20 == 1:
+                    logging.warning(
+                        f"[recovery] {pos.ticker}: SHORT-RECOVERY с order_id — "
+                        f"промоция по отчёту входной заявки не выполняется"
+                    )
+                continue
+    
+            # entry_order_id — клиентский UUID входной BUY-заявки робота
+            # (ЭТАП 5Б): опрос строго по ORDER_ID_TYPE_REQUEST.
+>           state = await client.get_sandbox_order_state(pos.entry_order_id, order_id_type="REQUEST")
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: FakeClient.get_sandbox_order_state() got an unexpected keyword argument 'order_id_type'
+
+main.py:4624: TypeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-25 16:16:00,788 - WARNING - [execution] RECOVERY TEST qty=2 source=no_price
+------------------------------ Captured log call -------------------------------
+WARNING  root:execution.py:530 [execution] RECOVERY TEST qty=2 source=no_price
+________ test_n4_late_growth_after_terminal_cancelled_actually_repolled ________
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_n4_late_growth_after_term0'))
+
+    @pytest.mark.asyncio
+    async def test_n4_late_growth_after_terminal_cancelled_actually_repolled(env):
+        """После регистрации исполнения по терминальному CANCELLED повторная
+        сверка ПРОДОЛЖАЕТСЯ: поздний рост 3 -> 8 лотов обнаруживается опросом
+        и применяется к RECOVERY-позиции без дубликатов и повторного счёта."""
+        ledger = make_ledger(env.tmp_path)
+        client = FakeClient(positions={})
+        oid = "oid-residual"
+        ledger.record_intent(oid, trade_id="t-r", figi=FIGI, ticker=TICKER,
+                             side="BUY", requested_lots=10)
+        monitor = ExecutionMonitor(client)
+    
+        # фаза 1: терминальный CANCELLED с исполнением 3 -> RECOVERY qty=3
+        client.order_states[oid] = fake_state(CANCELLED, lots_executed=3, price_units=300)
+>       await main.poll_open_orders(client, monitor, FakeRM(), ledger)
+
+test_p0_batch2_late_execution.py:342: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87779250>
+monitor = <execution.ExecutionMonitor object at 0x7f3e877795e0>
+rm = <tests.test_p0_defect_fixes.FakeRM object at 0x7f3e87778260>
+ledger = <order_ledger.OrderLedger object at 0x7f3e87778d40>
+
+    async def poll_open_orders(client: TinkoffClient, monitor: ExecutionMonitor,
+                               rm: RiskManager, ledger: OrderLedger):
+        """
+        Пошаговый (по одной заявке за цикл, без блокировки цикла) контроль
+        незавершённых BUY-заявок из реестра (этап 5).
+    
+        Правила разрешения:
+          - терминальный статус с исполнением -> регистрация через единую точку
+            (RECOVERY при неполных данных); для CANCELLED/EXPIRED с исполненными
+            лотами статус заявки сохраняется как CANCELLED/EXPIRED с частичным
+            исполнением (дефект №2: статус и факт исполнения учитываются
+            раздельно, в позицию идёт только реально исполненное количество);
+          - FILL с lots_executed=0 — противоречие: UNCERTAIN, НЕ терминальный
+            FILL, НЕ отказ (дефект №8);
+          - терминальный статус БЕЗ исполнения (достоверное подтверждение брокера)
+            -> заявка закрыта в реестре, BUY по FIGI разблокируется;
+          - статус недоступен/заявка не найдена -> НЕ отказ: заявка остаётся в
+            реестре (UNCERTAIN-логика), новые BUY по FIGI блокированы;
+          - PARTIALLYFILL или NEW старше ORDER_POLL_MAX_AGE_CYCLES -> сначала
+            регистрация подтверждённых лотов, затем отмена остатка (дефект №1);
+          - заявки с неизвестной стороной (side=None) опрашиваются: завершение
+            без исполнения разрешает блокировку; признаки исполнения при
+            неизвестной стороне остаются UNCERTAIN для оператора (дефект №4);
+          - партия P0-2: терминальные заявки С ИСПОЛНЕНИЕМ (CANCELLED/EXPIRED с
+            executed_lots>0, FILL при исполнении меньше запрошенного) остаются
+            доступны для повторной сверки (order_ledger.open_orders) — поздний
+            рост lots_executed после терминального статуса не теряется;
+            повторная регистрация уже применённого исполнения без активной
+            позиции запрещена («воскрешение» закрытой позиции).
+        """
+        for rec in list(ledger.open_orders(side="BUY")):
+            order_id = rec["order_id"]
+            figi = rec.get("figi") or ""
+            ticker = rec.get("ticker") or figi or "?"
+    
+            # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи.
+>           state = await _poll_ledger_order_state(client, rec)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+main.py:4210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87779250>
+rec = {'avg_exec_price': None, 'commission': None, 'created_at_utc': '2026-11-25T16:16:00.879950+00:00', 'error': None, ...}
+
+    async def _poll_ledger_order_state(client: TinkoffClient, rec: dict):
+        """ЭТАП 5Б (§5.3/§5.4): статус заявки из записи реестра с ЯВНЫМ типом
+        идентификатора.
+    
+        Записи, созданные роботом (record_intent ДО отправки), имеют
+        order_request_id == order_id (клиентский UUID) — опрос строго по
+        ORDER_ID_TYPE_REQUEST. Клиентский UUID НИКОГДА не передаётся как
+        биржевой ID.
+    
+        Записи без order_request_id (legacy / неизвестные заявки брокера,
+        ключенные биржевым ID) опрашиваются по-прежнему — без order_id_type,
+        чтобы не менять их поведение без подтверждения требуемого типа.
+    
+        None — состояние НЕИЗВЕСТНО: вызывающий код не трактует его как отказ
+        (fail-closed, как и прежде)."""
+        oid = str(rec.get("order_id") or "")
+        if not oid:
+            return None
+        if rec.get("order_request_id"):
+            # запись робота: ключ — клиентский UUID (ORDER_ID_TYPE_REQUEST)
+>           return await client.get_sandbox_order_state(oid, order_id_type="REQUEST")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: FakeClient.get_sandbox_order_state() got an unexpected keyword argument 'order_id_type'
+
+main.py:708: TypeError
+____ test_integration_trading_cycle_partial_cancel_recovery_open_late_lots _____
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_integration_trading_cycle0'))
+
+    @pytest.mark.asyncio
+    async def test_integration_trading_cycle_partial_cancel_recovery_open_late_lots(env):
+        """Полная последовательность торгового цикла:
+        1) BUY с частичным исполнением (2 из 5), отмена остатка, цена недоступна
+           -> RECOVERY qty=2;
+        2) заявка ещё жива (NEW с ценой) -> промоция НЕ выполняется;
+        3) заявка терминальна (CANCELLED, цена доступна) -> RECOVERY -> OPEN;
+        4) поздний рост исполнения 2 -> 5 -> количество OPEN-позиции растёт до 5,
+           SL/TP сохранены, дубликатов нет."""
+        ledger = make_ledger(env.tmp_path)
+        client = FakeClient(positions={})
+        monitor = ExecutionMonitor(client)
+        rm = FakeRM(sl=95.0, tp=110.0, size=5)
+        sm = FakeSM("BUY")
+        main.monitor_ref = monitor
+        main.ledger_ref = ledger
+    
+        # --- Фаза 1: вход с частичным исполнением, отмена остатка, без цены ---
+        main.top_instruments.clear()
+        main.top_instruments.extend([{"figi": FIGI, "ticker": TICKER}])
+        client.prices_value = {FIGI: 100.0}
+        client.post_state = fake_state(PARTIALLYFILL, lots_executed=2)
+        client.final_state = fake_state(CANCELLED, lots_executed=2, price_units=0)  # цены нет
+>       await main.trading_cycle(client, rm, sm, monitor, ledger)
+
+test_p0_batch2_late_execution.py:426: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87778ec0>
+rm = <tests.test_p0_defect_fixes.FakeRM object at 0x7f3e87778e60>
+sm = <tests.test_p0_defect_fixes.FakeSM object at 0x7f3e87778b60>
+monitor = <execution.ExecutionMonitor object at 0x7f3e87778f80>
+ledger = <order_ledger.OrderLedger object at 0x7f3e87778a40>
+
+    async def trading_cycle(client: TinkoffClient, rm: RiskManager, sm: StrategyManager, monitor: ExecutionMonitor, ledger: Optional[OrderLedger] = None):
+        global reconcile_done, monitor_ref
+        if ledger is None:
+            ledger = ledger_ref
+        # ЭТАП 5Б: monitor_ref используется close_position для регистрации
+        # намерения SELL в журнале позиции ДО отправки (та же ссылка, что и в
+        # main(); присваивание ссылки идемпотентно, учёт не меняет).
+        monitor_ref = monitor
+    
+        # 1. Цены: TOP-10 + открытые позиции
+        figi_set = set(p.figi for p in monitor.positions.values())
+        figi_set.update(i['figi'] for i in top_instruments)
+        figi_to_monitor = list(figi_set)
+        prices = await client.get_last_prices(figi_to_monitor)
+    
+        if prices is None:
+            logging.error("[cycle] prices=None — monitoring_error=True, мониторинг продолжается")
+            monitor.monitoring_error = True
+            prices = {}
+    
+        # 2. SL/TP
+        # С1: свечные экстремумы и ATR — ТОЛЬКО при включённом безубытке/трейлинге
+        # (config.BE_TRAIL_ENABLED, по умолчанию False — ноль доп. вызовов API).
+        extremes, atrs = {}, {}
+        if getattr(config, "BE_TRAIL_ENABLED", False):
+            open_figis = [p.figi for p in monitor.positions.values()
+                          if p.state == PositionState.OPEN]
+            if open_figis:
+                extremes, atrs = await _fetch_extremes_and_atrs(client, open_figis)
+        to_close = await monitor.check_all(prices, extremes=extremes or None, atrs=atrs or None)
+        for pos in to_close:
+            price = prices.get(pos.figi)
+            if price is None or price <= 0:
+                logging.error(f"[cycle] {pos.ticker}: нет цены для закрытия — пропуск (UNCERTAIN)")
+                pos.state = PositionState.UNCERTAIN
+                client.uncertain_state = True
+                continue
+            await close_position(client, pos, price)
+    
+        # 3. Обработка закрытий и UNCERTAIN
+        await process_closing(client, monitor, rm)
+    
+        # 3.5 Этап 5: пошаговый контроль незавершённых BUY-заявок (не блокирует цикл)
+        if ledger is not None:
+            await poll_open_orders(client, monitor, rm, ledger)
+    
+        # 3.6 Этап 5: восстановление цены входа для RECOVERY-позиций
+        if ledger is not None:
+            await promote_recovery_positions(client, monitor, rm, ledger)
+    
+        # 4. Сверка с брокером — теперь В КАЖДОМ штатном цикле (v2.3.1-stage1, ТЗ-1/2).
+        # Раньше reconcile запускался только при uncertain_state / UNCERTAIN-позициях /
+        # на старте: ручная продажа позиции в приложении брокера не выставляет ни
+        # один из этих флагов, поэтому пакет В2/В3 (живущий внутри reconcile) в
+        # штатном цикле не срабатывал — фантомная OPEN-позиция мониторилась до
+        # рестарта, а при срабатывании SL/TP по ней отправлялись обречённые
+        # SELL-заявки (отказ брокера -> обратно OPEN -> снова SELL). Теперь
+        # исчезновение позиции обнаруживается по ДОСТОВЕРНОМУ снимку брокера в
+        # каждом цикле: В2 закрывает учёт по своей SELL-заявке, В3 требует два
+        # последовательных достоверных снимка с разносом не меньше
+        # RECONCILE_CONFIRM_MIN_AGE_SECONDS (двойное подтверждение сохранено;
+        # недостоверный снимок None подтверждением не является — reconcile
+        # при None выходит раньше, учёт не меняется). Стоимость: один
+        # get_positions() за цикл — такой же вызов и так выполняется на шаге 6
+        # перед входами.
+        await reconcile(client, monitor, ledger, rm)
+        if client.is_uncertain():
+            logging.warning("[cycle] reconcile не снял UNCERTAIN — новые входы запрещены.")
+            _save_state_checked(monitor, rm)
+            return
+    
+        # 5. Блокировки входов
+        if not is_trading_enabled():
+            logging.info("[cycle] Торговля выключена (нет trading.flag).")
+            _save_state_checked(monitor, rm)
+            return
+        if not reconcile_done:
+            logging.warning("[cycle] reconcile не завершён.")
+            _save_state_checked(monitor, rm)
+            return
+        if monitor.monitoring_error:
+            logging.warning("[cycle] monitoring_error=True — новые входы запрещены.")
+            _save_state_checked(monitor, rm)
+            return
+        if state_save_failed:
+            # Этап 5 (D6): незаписанное состояние не дополняется новыми рисками
+            logging.error("[cycle] state.json не сохранён ранее — новые входы запрещены до успешного сохранения.")
+            _save_state_checked(monitor, rm)
+            return
+        if ledger is not None and not ledger.is_reliable():
+            # Дефект №5: недостоверный реестр (повреждение/ошибка чтения журнала) —
+            # робот может «забыть» ранее созданные заявки. Новые BUY запрещены
+            # до восстановления целостности ЖУРНАЛОМ ОПЕРАТОРА (журнал не
+            # обрезается и не перезаписывается автоматически). Позиции
+            # продолжают мониториться (SL/TP и закрытия работают).
+            logging.error(
+                "[cycle] Реестр заявок НЕДОСТОВЕРЕН — новые BUY запрещены до "
+                f"восстановления целостности. Причина: {ledger.unreliable_reason}"
+            )
+            _save_state_checked(monitor, rm)
+            return
+        if ledger is not None and ledger.has_unknown_figi_open_orders():
+            # Дефект №4: незавершённая заявка без FIGI — неизвестно, какой
+            # инструмент она затрагивает. Новые BUY запрещены ГЛОБАЛЬНО до
+            # разрешения неопределённости. Существующие позиции мониторятся.
+            logging.error(
+                "[cycle] Незавершённая заявка БЕЗ FIGI в реестре — новые BUY "
+                "запрещены ГЛОБАЛЬНО до разрешения неопределённости."
+            )
+            _save_state_checked(monitor, rm)
+            return
+    
+        # 6. Свежий портфель перед входами
+        positions = await client.get_positions()
+        if positions is None:
+            logging.error("[cycle] Портфель недостоверен перед входом — новые входы запрещены.")
+            client.uncertain_state = True
+            reconcile_done = False
+            _save_state_checked(monitor, rm)
+            return
+    
+        # 7. Входы
+        for inst in top_instruments:
+            figi = inst['figi']
+            price = prices.get(figi)
+            if price is None or price <= 0:
+                logging.info(f"{inst['ticker']}: нет цены, пропуск")
+                continue
+            pos_data = positions.get(figi)
+            if (pos_data is not None and pos_data.lots != 0) or monitor.has_active_position(figi):
+                logging.info(f"{inst['ticker']}: позиция уже открыта/в неопределённости, пропуск")
+                continue
+            if ledger is not None and ledger.figi_blocks_buy(figi):
+                # Дефект №4: вход блокирует ЛЮБАЯ незавершённая/неопределённая
+                # заявка по FIGI: незавершённая BUY, заявка с неизвестной стороной
+                # (side=None) и UNCERTAIN любой стороны. Нельзя разрешать BUY
+                # только потому, что сторона заявки неизвестна.
+                logging.warning(f"{inst['ticker']}: в реестре есть незавершённая/неопределённая заявка по FIGI — вход заблокирован")
+                continue
+    
+            df = await _build_candles_df(client, figi)
+            if df is None:
+                logging.info(f"{inst['ticker']}: мало свечей (<{config.MIN_CANDLES_FOR_SIGNAL}), пропуск")
+                continue
+    
+            signal, reason = sm.get_signal(df, float(price), drop_incomplete=True)
+    
+            if signal == "HOLD":
+                logging.info(f"{inst['ticker']}: HOLD ({reason})")
+                _log_strategy_diagnostic(
+                    event_type="STRATEGY_HOLD", ticker=inst['ticker'], figi=figi,
+                    signal=signal, reason=reason, sm=sm, df=df, price=float(price),
+                )
+                continue
+    
+            if signal == "SELL":
+                logging.info(f"{inst['ticker']}: SELL без позиции — шорт запрещён")
+                _log_strategy_diagnostic(
+                    event_type="STRATEGY_SELL_IGNORED", ticker=inst['ticker'], figi=figi,
+                    signal=signal, reason=reason, sm=sm, df=df, price=float(price),
+                )
+                continue
+    
+            lots = await rm.calculate_position_size(figi, float(price), df)
+            if lots <= 0:
+                logging.info(f"{inst['ticker']}: размер позиции 0, пропуск")
+                continue
+    
+            info = await client.get_instrument_info(figi)
+            if not info:
+                logging.error(f"{inst['ticker']}: instrument_info=None — пропуск")
+                continue
+    
+            trade_id = uuid.uuid4().hex[:12]
+            # Этап 5 (P0-1): order_id генерируется ДО записи SIGNAL и до сетевого вызова —
+            # единый идентификатор намерения и заявки (контракт SDK 1.51.0 подтверждён)
+            order_id = str(uuid.uuid4())
+            order_send_time = datetime.now(timezone.utc).isoformat()
+            research_logger.log_event("SIGNAL", {
+                "trade_id": trade_id, "ticker": inst['ticker'], "figi": figi,
+                "signal": signal, "reason": reason, "price_before_order": float(price),
+                "requested_lots": lots, "lot_size": info['lot'],
+                "order_id": order_id,
+            })
+    
+            # Этап 5 (P0-2): INTENT в реестр ДО сетевого вызова.
+            # Запись не удалась — заявка НЕ отправляется (fail-closed).
+            if ledger is None:
+                logging.error(
+                    f"{inst['ticker']}: реестр заявок недоступен — вход заблокирован (fail-closed)"
+                )
+                _save_state_checked(monitor, rm)
+                continue
+            intent_ok = ledger.record_intent(
+                order_id, trade_id=trade_id, figi=figi, ticker=inst['ticker'],
+                side="BUY", requested_lots=lots,
+            )
+            if not intent_ok:
+                logging.error(
+                    f"{inst['ticker']}: INTENT не сохранён — заявка НЕ отправляется (fail-closed)"
+                )
+                research_logger.log_event("ORDER_INTENT_FAILED", {
+                    "trade_id": trade_id, "ticker": inst['ticker'], "figi": figi,
+                    "order_id": order_id, "requested_lots": lots,
+                })
+                _save_state_checked(monitor, rm)
+                continue
+            research_logger.log_event("ORDER_INTENT", {
+                "trade_id": trade_id, "ticker": inst['ticker'], "figi": figi,
+                "order_id": order_id, "requested_lots": lots,
+            })
+    
+            result = await client.post_market_order(figi, lots, OrderDirection.ORDER_DIRECTION_BUY, order_id=order_id)
+    
+            sent_status_name = _status_name(getattr(result.state, "execution_report_status", None)) if result.state is not None else None
+            sent_le = int(getattr(result.state, "lots_executed", 0) or 0) if result.state is not None else None
+    
+            if result.state is None:
+                logging.error(
+                    f"{inst['ticker']}: state=None (order_id={result.order_id}) — UNCERTAIN. "
+                    f"Повторная отправка запрещена."
+                )
+                client.uncertain_state = True
+                if ledger is not None:
+                    ledger.record_uncertain(
+                        order_id, trade_id=trade_id, figi=figi, ticker=inst['ticker'],
+                        side="BUY", requested_lots=lots,
+                        reason="post: ответ не получен — заявка могла быть принята брокером",
+                        source="post_market_order",
+                        error=str(result.error) if result.error else None,
+                    )
+                research_logger.log_event("BUY_UNKNOWN", {
+                    "trade_id": trade_id, "ticker": inst['ticker'], "figi": figi,
+                    "order_id": result.order_id,
+                })
+                _save_state_checked(monitor, rm)
+                continue
+    
+            # Этап 5: SENT сразу после ответа (post-ответ уже содержит статус и исполнение).
+            # ЭТАП 5Б (§5.2): биржевой ID из PostOrderResponse.order_id сохраняется
+            # в записи реестра (не отбрасывается); order_request_id — клиентский UUID.
+            if ledger is not None:
+                ledger.record_sent(
+                    order_id, trade_id=trade_id, figi=figi, ticker=inst['ticker'],
+                    side="BUY", requested_lots=lots, executed_lots=sent_le,
+                    status_hint=sent_status_name, source="post_response",
+                    exchange_order_id=getattr(result, "exchange_order_id", None),
+                    order_request_id=order_id,
+                )
+    
+            status = getattr(result.state, 'execution_report_status', None)
+            order_id = result.order_id
+    
+            # --- PARTIALLYFILL (этап 5: без потери заявки/позиции) ---
+            if status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_PARTIALLYFILL:
+                logging.error(
+                    f"{inst['ticker']}: ЧАСТИЧНОЕ исполнение покупки — отмена остатка "
+                    f"(order_id={order_id})"
+                )
+                research_logger.log_event("PARTIAL_FILL", {"trade_id": trade_id, "order_id": order_id})
+                client.uncertain_state = True
+    
+                # ЭТАП 5Б (§7): order_id — КЛИЕНТСКИЙ UUID этой же заявки
+                # (сгенерирован роботом до отправки) — отмена по REQUEST.
+>               cancel_resp = await client.cancel_order(order_id, order_id_type="REQUEST")
+                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E               TypeError: FakeClient.cancel_order() got an unexpected keyword argument 'order_id_type'
+
+main.py:5299: TypeError
+----------------------------- Captured stderr call -----------------------------
+2026-11-25 16:16:00,987 - INFO - [reconcile] Позиций нет (достоверно).
+2026-11-25 16:16:00,988 - ERROR - TEST: ЧАСТИЧНОЕ исполнение покупки — отмена остатка (order_id=84868e2b-7927-4ae6-be88-d0b121562a52)
+------------------------------ Captured log call -------------------------------
+INFO     root:main.py:2197 [reconcile] Позиций нет (достоверно).
+ERROR    root:main.py:5290 TEST: ЧАСТИЧНОЕ исполнение покупки — отмена остатка (order_id=84868e2b-7927-4ae6-be88-d0b121562a52)
+__________ test_p03_1_repeated_buy_report_does_not_restore_sold_lots ___________
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_p03_1_repeated_buy_report0'))
+
+    @pytest.mark.asyncio
+    async def test_p03_1_repeated_buy_report_does_not_restore_sold_lots(env):
+        """P0-3 Тест 1. BUY-заявка суммарно исполнилась на 8 лотов (RECOVERY).
+        Оператор вручную продал 3 лота: достоверная сверка портфеля уменьшает
+        остаток до 5. Повторный ответ ТОЙ ЖЕ заявки (lots_executed=8) НЕ должен
+        восстанавливать проданные лоты: quantity остаётся 5, накопительные
+        счётчики исполнения остаются 8, новые лоты не добавляются."""
+        ledger = make_ledger(env.tmp_path)
+        client = FakeClient(positions={})
+        oid = "oid-p03-1"
+        ledger.record_intent(oid, trade_id="t-p03-1", figi=FIGI, ticker=TICKER,
+                             side="BUY", requested_lots=10)
+        monitor = ExecutionMonitor(client)
+    
+        # фаза 1: исполнение 8 лотов без свечей -> RECOVERY qty=8, учтено 8
+        client.order_states[oid] = fake_state(CANCELLED, lots_executed=8, price_units=800)
+>       await main.poll_open_orders(client, monitor, FakeRM(), ledger)
+
+test_p0_batch2_late_execution.py:497: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e8777b1d0>
+monitor = <execution.ExecutionMonitor object at 0x7f3e8777a9f0>
+rm = <tests.test_p0_defect_fixes.FakeRM object at 0x7f3e877792b0>
+ledger = <order_ledger.OrderLedger object at 0x7f3e8777c290>
+
+    async def poll_open_orders(client: TinkoffClient, monitor: ExecutionMonitor,
+                               rm: RiskManager, ledger: OrderLedger):
+        """
+        Пошаговый (по одной заявке за цикл, без блокировки цикла) контроль
+        незавершённых BUY-заявок из реестра (этап 5).
+    
+        Правила разрешения:
+          - терминальный статус с исполнением -> регистрация через единую точку
+            (RECOVERY при неполных данных); для CANCELLED/EXPIRED с исполненными
+            лотами статус заявки сохраняется как CANCELLED/EXPIRED с частичным
+            исполнением (дефект №2: статус и факт исполнения учитываются
+            раздельно, в позицию идёт только реально исполненное количество);
+          - FILL с lots_executed=0 — противоречие: UNCERTAIN, НЕ терминальный
+            FILL, НЕ отказ (дефект №8);
+          - терминальный статус БЕЗ исполнения (достоверное подтверждение брокера)
+            -> заявка закрыта в реестре, BUY по FIGI разблокируется;
+          - статус недоступен/заявка не найдена -> НЕ отказ: заявка остаётся в
+            реестре (UNCERTAIN-логика), новые BUY по FIGI блокированы;
+          - PARTIALLYFILL или NEW старше ORDER_POLL_MAX_AGE_CYCLES -> сначала
+            регистрация подтверждённых лотов, затем отмена остатка (дефект №1);
+          - заявки с неизвестной стороной (side=None) опрашиваются: завершение
+            без исполнения разрешает блокировку; признаки исполнения при
+            неизвестной стороне остаются UNCERTAIN для оператора (дефект №4);
+          - партия P0-2: терминальные заявки С ИСПОЛНЕНИЕМ (CANCELLED/EXPIRED с
+            executed_lots>0, FILL при исполнении меньше запрошенного) остаются
+            доступны для повторной сверки (order_ledger.open_orders) — поздний
+            рост lots_executed после терминального статуса не теряется;
+            повторная регистрация уже применённого исполнения без активной
+            позиции запрещена («воскрешение» закрытой позиции).
+        """
+        for rec in list(ledger.open_orders(side="BUY")):
+            order_id = rec["order_id"]
+            figi = rec.get("figi") or ""
+            ticker = rec.get("ticker") or figi or "?"
+    
+            # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи.
+>           state = await _poll_ledger_order_state(client, rec)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+main.py:4210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e8777b1d0>
+rec = {'avg_exec_price': None, 'commission': None, 'created_at_utc': '2026-11-25T16:16:01.069965+00:00', 'error': None, ...}
+
+    async def _poll_ledger_order_state(client: TinkoffClient, rec: dict):
+        """ЭТАП 5Б (§5.3/§5.4): статус заявки из записи реестра с ЯВНЫМ типом
+        идентификатора.
+    
+        Записи, созданные роботом (record_intent ДО отправки), имеют
+        order_request_id == order_id (клиентский UUID) — опрос строго по
+        ORDER_ID_TYPE_REQUEST. Клиентский UUID НИКОГДА не передаётся как
+        биржевой ID.
+    
+        Записи без order_request_id (legacy / неизвестные заявки брокера,
+        ключенные биржевым ID) опрашиваются по-прежнему — без order_id_type,
+        чтобы не менять их поведение без подтверждения требуемого типа.
+    
+        None — состояние НЕИЗВЕСТНО: вызывающий код не трактует его как отказ
+        (fail-closed, как и прежде)."""
+        oid = str(rec.get("order_id") or "")
+        if not oid:
+            return None
+        if rec.get("order_request_id"):
+            # запись робота: ключ — клиентский UUID (ORDER_ID_TYPE_REQUEST)
+>           return await client.get_sandbox_order_state(oid, order_id_type="REQUEST")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: FakeClient.get_sandbox_order_state() got an unexpected keyword argument 'order_id_type'
+
+main.py:708: TypeError
+_____________ test_p03_2_stale_buy_report_contradiction_blocks_buy _____________
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_p03_2_stale_buy_report_co0'))
+
+    @pytest.mark.asyncio
+    async def test_p03_2_stale_buy_report_contradiction_blocks_buy(env):
+        """P0-3 Тест 2. RECOVERY-позиция: учтено 5 лотов (quantity=5).
+        Устаревший ответ BUY-заявки сообщает lots_executed=3 (меньше учтённого).
+        Ожидается: quantity не уменьшается, счётчики не уменьшаются,
+        фиксируется неопределённость/противоречие существующей архитектурой
+        (client.uncertain_state + UNCERTAIN-запись реестра), новые BUY по FIGI
+        блокированы предусмотренным механизмом."""
+        ledger = make_ledger(env.tmp_path)
+        client = FakeClient(positions={})
+        oid = "oid-p03-2"
+        ledger.record_intent(oid, trade_id="t-p03-2", figi=FIGI, ticker=TICKER,
+                             side="BUY", requested_lots=10)
+        monitor = ExecutionMonitor(client)
+    
+        # фаза 1: учтено 5 лотов (RECOVERY), в реестре CANCELLED/5
+        client.order_states[oid] = fake_state(CANCELLED, lots_executed=5, price_units=500)
+>       await main.poll_open_orders(client, monitor, FakeRM(), ledger)
+
+test_p0_batch2_late_execution.py:540: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87782840>
+monitor = <execution.ExecutionMonitor object at 0x7f3e87782bd0>
+rm = <tests.test_p0_defect_fixes.FakeRM object at 0x7f3e87782030>
+ledger = <order_ledger.OrderLedger object at 0x7f3e87782180>
+
+    async def poll_open_orders(client: TinkoffClient, monitor: ExecutionMonitor,
+                               rm: RiskManager, ledger: OrderLedger):
+        """
+        Пошаговый (по одной заявке за цикл, без блокировки цикла) контроль
+        незавершённых BUY-заявок из реестра (этап 5).
+    
+        Правила разрешения:
+          - терминальный статус с исполнением -> регистрация через единую точку
+            (RECOVERY при неполных данных); для CANCELLED/EXPIRED с исполненными
+            лотами статус заявки сохраняется как CANCELLED/EXPIRED с частичным
+            исполнением (дефект №2: статус и факт исполнения учитываются
+            раздельно, в позицию идёт только реально исполненное количество);
+          - FILL с lots_executed=0 — противоречие: UNCERTAIN, НЕ терминальный
+            FILL, НЕ отказ (дефект №8);
+          - терминальный статус БЕЗ исполнения (достоверное подтверждение брокера)
+            -> заявка закрыта в реестре, BUY по FIGI разблокируется;
+          - статус недоступен/заявка не найдена -> НЕ отказ: заявка остаётся в
+            реестре (UNCERTAIN-логика), новые BUY по FIGI блокированы;
+          - PARTIALLYFILL или NEW старше ORDER_POLL_MAX_AGE_CYCLES -> сначала
+            регистрация подтверждённых лотов, затем отмена остатка (дефект №1);
+          - заявки с неизвестной стороной (side=None) опрашиваются: завершение
+            без исполнения разрешает блокировку; признаки исполнения при
+            неизвестной стороне остаются UNCERTAIN для оператора (дефект №4);
+          - партия P0-2: терминальные заявки С ИСПОЛНЕНИЕМ (CANCELLED/EXPIRED с
+            executed_lots>0, FILL при исполнении меньше запрошенного) остаются
+            доступны для повторной сверки (order_ledger.open_orders) — поздний
+            рост lots_executed после терминального статуса не теряется;
+            повторная регистрация уже применённого исполнения без активной
+            позиции запрещена («воскрешение» закрытой позиции).
+        """
+        for rec in list(ledger.open_orders(side="BUY")):
+            order_id = rec["order_id"]
+            figi = rec.get("figi") or ""
+            ticker = rec.get("ticker") or figi or "?"
+    
+            # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи.
+>           state = await _poll_ledger_order_state(client, rec)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+main.py:4210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87782840>
+rec = {'avg_exec_price': None, 'commission': None, 'created_at_utc': '2026-11-25T16:16:01.188473+00:00', 'error': None, ...}
+
+    async def _poll_ledger_order_state(client: TinkoffClient, rec: dict):
+        """ЭТАП 5Б (§5.3/§5.4): статус заявки из записи реестра с ЯВНЫМ типом
+        идентификатора.
+    
+        Записи, созданные роботом (record_intent ДО отправки), имеют
+        order_request_id == order_id (клиентский UUID) — опрос строго по
+        ORDER_ID_TYPE_REQUEST. Клиентский UUID НИКОГДА не передаётся как
+        биржевой ID.
+    
+        Записи без order_request_id (legacy / неизвестные заявки брокера,
+        ключенные биржевым ID) опрашиваются по-прежнему — без order_id_type,
+        чтобы не менять их поведение без подтверждения требуемого типа.
+    
+        None — состояние НЕИЗВЕСТНО: вызывающий код не трактует его как отказ
+        (fail-closed, как и прежде)."""
+        oid = str(rec.get("order_id") or "")
+        if not oid:
+            return None
+        if rec.get("order_request_id"):
+            # запись робота: ключ — клиентский UUID (ORDER_ID_TYPE_REQUEST)
+>           return await client.get_sandbox_order_state(oid, order_id_type="REQUEST")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: FakeClient.get_sandbox_order_state() got an unexpected keyword argument 'order_id_type'
+
+main.py:708: TypeError
+____________ test_p04_reconcile_before_poll_no_reapply_of_late_lots ____________
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_p04_reconcile_before_poll0'))
+
+    @pytest.mark.asyncio
+    async def test_p04_reconcile_before_poll_no_reapply_of_late_lots(env):
+        """P0-4, воспроизводимый сценарий постановки (§2).
+    
+        Исходное состояние RECOVERY: quantity=8, entry_applied_lots=8,
+        executed_lots=8, в реестре исполнение 8 лотов. Далее:
+          1) оператор вручную продаёт 3 лота, затем по отменённой BUY-заявке
+             приходит позднее исполнение ещё 2 лотов: у брокера остаток 7,
+             накопительное исполнение заявки — 10;
+          2) в одном торговом цикле reconcile() выполняется РАНЬШЕ
+             poll_open_orders(): сверка получает остаток 7 и обновляет RECOVERY;
+          3) затем poll_open_orders() получает lots_executed=10.
+    
+        ОБЯЗАТЕЛЬНОЕ утверждение: локальный quantity == 7, а НЕ 9 — позднее
+        исполнение уже отражено в брокерском остатке, повторно прибавлять
+        его нельзя. Дополнительно: старое накопительное исполнение не
+        восстанавливает проданные лоты; счётчики исполнения заявки догоняются
+        по отчёту заявки; неоднозначность фиксируется существующей
+        архитектурой (uncertain_state + UNCERTAIN в реестре, новые BUY по
+        FIGI блокированы); повторный опрос того же ордера не меняет остаток;
+        контрольная сверка подтверждает остаток."""
+        ledger = make_ledger(env.tmp_path)
+        client = FakeClient(positions={})
+        oid = "oid-p04-race"
+        ledger.record_intent(oid, trade_id="t-p04", figi=FIGI, ticker=TICKER,
+                             side="BUY", requested_lots=10)
+        monitor = ExecutionMonitor(client)
+    
+        # --- Фаза 1: RECOVERY 8/8/8 (исполнение ДО ручной продажи) ---
+        client.order_states[oid] = fake_state(CANCELLED, lots_executed=8, price_units=800)
+>       await main.poll_open_orders(client, monitor, FakeRM(), ledger)
+
+test_p0_batch2_late_execution.py:643: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87782900>
+monitor = <execution.ExecutionMonitor object at 0x7f3e881557c0>
+rm = <tests.test_p0_defect_fixes.FakeRM object at 0x7f3e877824e0>
+ledger = <order_ledger.OrderLedger object at 0x7f3e877818e0>
+
+    async def poll_open_orders(client: TinkoffClient, monitor: ExecutionMonitor,
+                               rm: RiskManager, ledger: OrderLedger):
+        """
+        Пошаговый (по одной заявке за цикл, без блокировки цикла) контроль
+        незавершённых BUY-заявок из реестра (этап 5).
+    
+        Правила разрешения:
+          - терминальный статус с исполнением -> регистрация через единую точку
+            (RECOVERY при неполных данных); для CANCELLED/EXPIRED с исполненными
+            лотами статус заявки сохраняется как CANCELLED/EXPIRED с частичным
+            исполнением (дефект №2: статус и факт исполнения учитываются
+            раздельно, в позицию идёт только реально исполненное количество);
+          - FILL с lots_executed=0 — противоречие: UNCERTAIN, НЕ терминальный
+            FILL, НЕ отказ (дефект №8);
+          - терминальный статус БЕЗ исполнения (достоверное подтверждение брокера)
+            -> заявка закрыта в реестре, BUY по FIGI разблокируется;
+          - статус недоступен/заявка не найдена -> НЕ отказ: заявка остаётся в
+            реестре (UNCERTAIN-логика), новые BUY по FIGI блокированы;
+          - PARTIALLYFILL или NEW старше ORDER_POLL_MAX_AGE_CYCLES -> сначала
+            регистрация подтверждённых лотов, затем отмена остатка (дефект №1);
+          - заявки с неизвестной стороной (side=None) опрашиваются: завершение
+            без исполнения разрешает блокировку; признаки исполнения при
+            неизвестной стороне остаются UNCERTAIN для оператора (дефект №4);
+          - партия P0-2: терминальные заявки С ИСПОЛНЕНИЕМ (CANCELLED/EXPIRED с
+            executed_lots>0, FILL при исполнении меньше запрошенного) остаются
+            доступны для повторной сверки (order_ledger.open_orders) — поздний
+            рост lots_executed после терминального статуса не теряется;
+            повторная регистрация уже применённого исполнения без активной
+            позиции запрещена («воскрешение» закрытой позиции).
+        """
+        for rec in list(ledger.open_orders(side="BUY")):
+            order_id = rec["order_id"]
+            figi = rec.get("figi") or ""
+            ticker = rec.get("ticker") or figi or "?"
+    
+            # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи.
+>           state = await _poll_ledger_order_state(client, rec)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+main.py:4210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87782900>
+rec = {'avg_exec_price': None, 'commission': None, 'created_at_utc': '2026-11-25T16:16:01.305866+00:00', 'error': None, ...}
+
+    async def _poll_ledger_order_state(client: TinkoffClient, rec: dict):
+        """ЭТАП 5Б (§5.3/§5.4): статус заявки из записи реестра с ЯВНЫМ типом
+        идентификатора.
+    
+        Записи, созданные роботом (record_intent ДО отправки), имеют
+        order_request_id == order_id (клиентский UUID) — опрос строго по
+        ORDER_ID_TYPE_REQUEST. Клиентский UUID НИКОГДА не передаётся как
+        биржевой ID.
+    
+        Записи без order_request_id (legacy / неизвестные заявки брокера,
+        ключенные биржевым ID) опрашиваются по-прежнему — без order_id_type,
+        чтобы не менять их поведение без подтверждения требуемого типа.
+    
+        None — состояние НЕИЗВЕСТНО: вызывающий код не трактует его как отказ
+        (fail-closed, как и прежде)."""
+        oid = str(rec.get("order_id") or "")
+        if not oid:
+            return None
+        if rec.get("order_request_id"):
+            # запись робота: ключ — клиентский UUID (ORDER_ID_TYPE_REQUEST)
+>           return await client.get_sandbox_order_state(oid, order_id_type="REQUEST")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: FakeClient.get_sandbox_order_state() got an unexpected keyword argument 'order_id_type'
+
+main.py:708: TypeError
+_______________ test_p05_1_first_ambiguous_growth_sets_uncertain _______________
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_p05_1_first_ambiguous_gro0'))
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3e877801a0>
+
+    @pytest.mark.asyncio
+    async def test_p05_1_first_ambiguous_growth_sets_uncertain(env, monkeypatch):
+        """P0-5 (1). Первый неоднозначный рост lots_executed ПОСЛЕ достоверной
+        синхронизации остатка снимком портфеля переводит заявку в UNCERTAIN:
+        client.uncertain_state=True, UNCERTAIN-запись реестра, блокировка новых
+        BUY по FIGI; дельта к остатку не добавлена (защита партии P0-4)."""
+>       ledger, client, monitor, oid = await _p05_setup_ambiguity(env, monkeypatch)
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_p0_batch2_late_execution.py:814: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_p05_1_first_ambiguous_gro0'))
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3e877801a0>
+oid = 'oid-p05'
+
+    async def _p05_setup_ambiguity(env, monkeypatch, oid="oid-p05"):
+        """Общая подготовка сценария P0-5:
+          фаза 1: исполнение 8 лотов без свечей -> RECOVERY 8/8/8;
+          фаза 2: достоверная сверка портфеля: остаток 7 (снимок мог уже
+                  включать поздние лоты) — маркер подтверждённой сверки
+                  выставляется ДО появления UNCERTAIN;
+          фаза 3: неоднозначный рост lots_executed 8 -> 10 ПОСЛЕ достоверной
+                  синхронизации остатка снимком -> UNCERTAIN-запись реестра,
+                  FIGI заблокирован, quantity остаётся 7.
+        Возвращает (ledger, client, monitor, oid)."""
+        # raising=False: маркер существует только в коде с фиксом P0-5 — на коде
+        # без фикса атрибут создаётся как None (демонстрация дефекта честная:
+        # падают только тесты, проверяющие перезапись UNCERTAIN).
+        monkeypatch.setattr(main, "_last_reconcile_confirmed_utc", None, raising=False)
+        ledger = make_ledger(env.tmp_path)
+        client = FakeClient(positions={})
+        ledger.record_intent(oid, trade_id="t-p05", figi=FIGI, ticker=TICKER,
+                             side="BUY", requested_lots=10)
+        monitor = ExecutionMonitor(client)
+    
+        # фаза 1: RECOVERY 8/8/8
+        client.order_states[oid] = fake_state(CANCELLED, lots_executed=8, price_units=800)
+>       await main.poll_open_orders(client, monitor, FakeRM(), ledger)
+
+test_p0_batch2_late_execution.py:778: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e877826c0>
+monitor = <execution.ExecutionMonitor object at 0x7f3e87782fc0>
+rm = <tests.test_p0_defect_fixes.FakeRM object at 0x7f3e87782de0>
+ledger = <order_ledger.OrderLedger object at 0x7f3e87781ee0>
+
+    async def poll_open_orders(client: TinkoffClient, monitor: ExecutionMonitor,
+                               rm: RiskManager, ledger: OrderLedger):
+        """
+        Пошаговый (по одной заявке за цикл, без блокировки цикла) контроль
+        незавершённых BUY-заявок из реестра (этап 5).
+    
+        Правила разрешения:
+          - терминальный статус с исполнением -> регистрация через единую точку
+            (RECOVERY при неполных данных); для CANCELLED/EXPIRED с исполненными
+            лотами статус заявки сохраняется как CANCELLED/EXPIRED с частичным
+            исполнением (дефект №2: статус и факт исполнения учитываются
+            раздельно, в позицию идёт только реально исполненное количество);
+          - FILL с lots_executed=0 — противоречие: UNCERTAIN, НЕ терминальный
+            FILL, НЕ отказ (дефект №8);
+          - терминальный статус БЕЗ исполнения (достоверное подтверждение брокера)
+            -> заявка закрыта в реестре, BUY по FIGI разблокируется;
+          - статус недоступен/заявка не найдена -> НЕ отказ: заявка остаётся в
+            реестре (UNCERTAIN-логика), новые BUY по FIGI блокированы;
+          - PARTIALLYFILL или NEW старше ORDER_POLL_MAX_AGE_CYCLES -> сначала
+            регистрация подтверждённых лотов, затем отмена остатка (дефект №1);
+          - заявки с неизвестной стороной (side=None) опрашиваются: завершение
+            без исполнения разрешает блокировку; признаки исполнения при
+            неизвестной стороне остаются UNCERTAIN для оператора (дефект №4);
+          - партия P0-2: терминальные заявки С ИСПОЛНЕНИЕМ (CANCELLED/EXPIRED с
+            executed_lots>0, FILL при исполнении меньше запрошенного) остаются
+            доступны для повторной сверки (order_ledger.open_orders) — поздний
+            рост lots_executed после терминального статуса не теряется;
+            повторная регистрация уже применённого исполнения без активной
+            позиции запрещена («воскрешение» закрытой позиции).
+        """
+        for rec in list(ledger.open_orders(side="BUY")):
+            order_id = rec["order_id"]
+            figi = rec.get("figi") or ""
+            ticker = rec.get("ticker") or figi or "?"
+    
+            # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи.
+>           state = await _poll_ledger_order_state(client, rec)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+main.py:4210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e877826c0>
+rec = {'avg_exec_price': None, 'commission': None, 'created_at_utc': '2026-11-25T16:16:01.421360+00:00', 'error': None, ...}
+
+    async def _poll_ledger_order_state(client: TinkoffClient, rec: dict):
+        """ЭТАП 5Б (§5.3/§5.4): статус заявки из записи реестра с ЯВНЫМ типом
+        идентификатора.
+    
+        Записи, созданные роботом (record_intent ДО отправки), имеют
+        order_request_id == order_id (клиентский UUID) — опрос строго по
+        ORDER_ID_TYPE_REQUEST. Клиентский UUID НИКОГДА не передаётся как
+        биржевой ID.
+    
+        Записи без order_request_id (legacy / неизвестные заявки брокера,
+        ключенные биржевым ID) опрашиваются по-прежнему — без order_id_type,
+        чтобы не менять их поведение без подтверждения требуемого типа.
+    
+        None — состояние НЕИЗВЕСТНО: вызывающий код не трактует его как отказ
+        (fail-closed, как и прежде)."""
+        oid = str(rec.get("order_id") or "")
+        if not oid:
+            return None
+        if rec.get("order_request_id"):
+            # запись робота: ключ — клиентский UUID (ORDER_ID_TYPE_REQUEST)
+>           return await client.get_sandbox_order_state(oid, order_id_type="REQUEST")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: FakeClient.get_sandbox_order_state() got an unexpected keyword argument 'order_id_type'
+
+main.py:708: TypeError
+______________ test_p05_2_repeated_same_lots_poll_keeps_uncertain ______________
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_p05_2_repeated_same_lots_0'))
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3e87784110>
+
+    @pytest.mark.asyncio
+    async def test_p05_2_repeated_same_lots_poll_keeps_uncertain(env, monkeypatch):
+        """P0-5 (2)+(3). Повторный опрос с тем же lots_executed (терминальный
+        статус брокера CANCELLED) НЕ снимает ранее установленную UNCERTAIN:
+        запись реестра сохраняется (в том числе время последнего перехода),
+        терминальный статус НЕ пишется, блокировка новых BUY по FIGI остаётся,
+        количество позиции и счётчики не меняются, дубликата нет."""
+>       ledger, client, monitor, oid = await _p05_setup_ambiguity(env, monkeypatch)
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_p0_batch2_late_execution.py:832: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_p05_2_repeated_same_lots_0'))
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3e87784110>
+oid = 'oid-p05'
+
+    async def _p05_setup_ambiguity(env, monkeypatch, oid="oid-p05"):
+        """Общая подготовка сценария P0-5:
+          фаза 1: исполнение 8 лотов без свечей -> RECOVERY 8/8/8;
+          фаза 2: достоверная сверка портфеля: остаток 7 (снимок мог уже
+                  включать поздние лоты) — маркер подтверждённой сверки
+                  выставляется ДО появления UNCERTAIN;
+          фаза 3: неоднозначный рост lots_executed 8 -> 10 ПОСЛЕ достоверной
+                  синхронизации остатка снимком -> UNCERTAIN-запись реестра,
+                  FIGI заблокирован, quantity остаётся 7.
+        Возвращает (ledger, client, monitor, oid)."""
+        # raising=False: маркер существует только в коде с фиксом P0-5 — на коде
+        # без фикса атрибут создаётся как None (демонстрация дефекта честная:
+        # падают только тесты, проверяющие перезапись UNCERTAIN).
+        monkeypatch.setattr(main, "_last_reconcile_confirmed_utc", None, raising=False)
+        ledger = make_ledger(env.tmp_path)
+        client = FakeClient(positions={})
+        ledger.record_intent(oid, trade_id="t-p05", figi=FIGI, ticker=TICKER,
+                             side="BUY", requested_lots=10)
+        monitor = ExecutionMonitor(client)
+    
+        # фаза 1: RECOVERY 8/8/8
+        client.order_states[oid] = fake_state(CANCELLED, lots_executed=8, price_units=800)
+>       await main.poll_open_orders(client, monitor, FakeRM(), ledger)
+
+test_p0_batch2_late_execution.py:778: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87787ad0>
+monitor = <execution.ExecutionMonitor object at 0x7f3e87785400>
+rm = <tests.test_p0_defect_fixes.FakeRM object at 0x7f3e87787a10>
+ledger = <order_ledger.OrderLedger object at 0x7f3e87787800>
+
+    async def poll_open_orders(client: TinkoffClient, monitor: ExecutionMonitor,
+                               rm: RiskManager, ledger: OrderLedger):
+        """
+        Пошаговый (по одной заявке за цикл, без блокировки цикла) контроль
+        незавершённых BUY-заявок из реестра (этап 5).
+    
+        Правила разрешения:
+          - терминальный статус с исполнением -> регистрация через единую точку
+            (RECOVERY при неполных данных); для CANCELLED/EXPIRED с исполненными
+            лотами статус заявки сохраняется как CANCELLED/EXPIRED с частичным
+            исполнением (дефект №2: статус и факт исполнения учитываются
+            раздельно, в позицию идёт только реально исполненное количество);
+          - FILL с lots_executed=0 — противоречие: UNCERTAIN, НЕ терминальный
+            FILL, НЕ отказ (дефект №8);
+          - терминальный статус БЕЗ исполнения (достоверное подтверждение брокера)
+            -> заявка закрыта в реестре, BUY по FIGI разблокируется;
+          - статус недоступен/заявка не найдена -> НЕ отказ: заявка остаётся в
+            реестре (UNCERTAIN-логика), новые BUY по FIGI блокированы;
+          - PARTIALLYFILL или NEW старше ORDER_POLL_MAX_AGE_CYCLES -> сначала
+            регистрация подтверждённых лотов, затем отмена остатка (дефект №1);
+          - заявки с неизвестной стороной (side=None) опрашиваются: завершение
+            без исполнения разрешает блокировку; признаки исполнения при
+            неизвестной стороне остаются UNCERTAIN для оператора (дефект №4);
+          - партия P0-2: терминальные заявки С ИСПОЛНЕНИЕМ (CANCELLED/EXPIRED с
+            executed_lots>0, FILL при исполнении меньше запрошенного) остаются
+            доступны для повторной сверки (order_ledger.open_orders) — поздний
+            рост lots_executed после терминального статуса не теряется;
+            повторная регистрация уже применённого исполнения без активной
+            позиции запрещена («воскрешение» закрытой позиции).
+        """
+        for rec in list(ledger.open_orders(side="BUY")):
+            order_id = rec["order_id"]
+            figi = rec.get("figi") or ""
+            ticker = rec.get("ticker") or figi or "?"
+    
+            # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи.
+>           state = await _poll_ledger_order_state(client, rec)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+main.py:4210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87787ad0>
+rec = {'avg_exec_price': None, 'commission': None, 'created_at_utc': '2026-11-25T16:16:01.530911+00:00', 'error': None, ...}
+
+    async def _poll_ledger_order_state(client: TinkoffClient, rec: dict):
+        """ЭТАП 5Б (§5.3/§5.4): статус заявки из записи реестра с ЯВНЫМ типом
+        идентификатора.
+    
+        Записи, созданные роботом (record_intent ДО отправки), имеют
+        order_request_id == order_id (клиентский UUID) — опрос строго по
+        ORDER_ID_TYPE_REQUEST. Клиентский UUID НИКОГДА не передаётся как
+        биржевой ID.
+    
+        Записи без order_request_id (legacy / неизвестные заявки брокера,
+        ключенные биржевым ID) опрашиваются по-прежнему — без order_id_type,
+        чтобы не менять их поведение без подтверждения требуемого типа.
+    
+        None — состояние НЕИЗВЕСТНО: вызывающий код не трактует его как отказ
+        (fail-closed, как и прежде)."""
+        oid = str(rec.get("order_id") or "")
+        if not oid:
+            return None
+        if rec.get("order_request_id"):
+            # запись робота: ключ — клиентский UUID (ORDER_ID_TYPE_REQUEST)
+>           return await client.get_sandbox_order_state(oid, order_id_type="REQUEST")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: FakeClient.get_sandbox_order_state() got an unexpected keyword argument 'order_id_type'
+
+main.py:708: TypeError
+_________ test_p05_3_failed_or_contradictory_reconcile_keeps_uncertain _________
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_p05_3_failed_or_contradic0'))
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3e87786570>
+
+    @pytest.mark.asyncio
+    async def test_p05_3_failed_or_contradictory_reconcile_keeps_uncertain(env, monkeypatch):
+        """P0-5 (4)+(5). Ошибка reconcile() (недоступный снимок = None) и
+        противоречивый снимок (расхождение направлений) НЕ разрешают
+        неопределённость: маркер подтверждённой сверки не выставляется,
+        UNCERTAIN сохраняется, блокировка FIGI не снимается."""
+>       ledger, client, monitor, oid = await _p05_setup_ambiguity(env, monkeypatch)
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_p0_batch2_late_execution.py:868: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_p05_3_failed_or_contradic0'))
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3e87786570>
+oid = 'oid-p05'
+
+    async def _p05_setup_ambiguity(env, monkeypatch, oid="oid-p05"):
+        """Общая подготовка сценария P0-5:
+          фаза 1: исполнение 8 лотов без свечей -> RECOVERY 8/8/8;
+          фаза 2: достоверная сверка портфеля: остаток 7 (снимок мог уже
+                  включать поздние лоты) — маркер подтверждённой сверки
+                  выставляется ДО появления UNCERTAIN;
+          фаза 3: неоднозначный рост lots_executed 8 -> 10 ПОСЛЕ достоверной
+                  синхронизации остатка снимком -> UNCERTAIN-запись реестра,
+                  FIGI заблокирован, quantity остаётся 7.
+        Возвращает (ledger, client, monitor, oid)."""
+        # raising=False: маркер существует только в коде с фиксом P0-5 — на коде
+        # без фикса атрибут создаётся как None (демонстрация дефекта честная:
+        # падают только тесты, проверяющие перезапись UNCERTAIN).
+        monkeypatch.setattr(main, "_last_reconcile_confirmed_utc", None, raising=False)
+        ledger = make_ledger(env.tmp_path)
+        client = FakeClient(positions={})
+        ledger.record_intent(oid, trade_id="t-p05", figi=FIGI, ticker=TICKER,
+                             side="BUY", requested_lots=10)
+        monitor = ExecutionMonitor(client)
+    
+        # фаза 1: RECOVERY 8/8/8
+        client.order_states[oid] = fake_state(CANCELLED, lots_executed=8, price_units=800)
+>       await main.poll_open_orders(client, monitor, FakeRM(), ledger)
+
+test_p0_batch2_late_execution.py:778: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87786ea0>
+monitor = <execution.ExecutionMonitor object at 0x7f3e87784da0>
+rm = <tests.test_p0_defect_fixes.FakeRM object at 0x7f3e87784b30>
+ledger = <order_ledger.OrderLedger object at 0x7f3e87785dc0>
+
+    async def poll_open_orders(client: TinkoffClient, monitor: ExecutionMonitor,
+                               rm: RiskManager, ledger: OrderLedger):
+        """
+        Пошаговый (по одной заявке за цикл, без блокировки цикла) контроль
+        незавершённых BUY-заявок из реестра (этап 5).
+    
+        Правила разрешения:
+          - терминальный статус с исполнением -> регистрация через единую точку
+            (RECOVERY при неполных данных); для CANCELLED/EXPIRED с исполненными
+            лотами статус заявки сохраняется как CANCELLED/EXPIRED с частичным
+            исполнением (дефект №2: статус и факт исполнения учитываются
+            раздельно, в позицию идёт только реально исполненное количество);
+          - FILL с lots_executed=0 — противоречие: UNCERTAIN, НЕ терминальный
+            FILL, НЕ отказ (дефект №8);
+          - терминальный статус БЕЗ исполнения (достоверное подтверждение брокера)
+            -> заявка закрыта в реестре, BUY по FIGI разблокируется;
+          - статус недоступен/заявка не найдена -> НЕ отказ: заявка остаётся в
+            реестре (UNCERTAIN-логика), новые BUY по FIGI блокированы;
+          - PARTIALLYFILL или NEW старше ORDER_POLL_MAX_AGE_CYCLES -> сначала
+            регистрация подтверждённых лотов, затем отмена остатка (дефект №1);
+          - заявки с неизвестной стороной (side=None) опрашиваются: завершение
+            без исполнения разрешает блокировку; признаки исполнения при
+            неизвестной стороне остаются UNCERTAIN для оператора (дефект №4);
+          - партия P0-2: терминальные заявки С ИСПОЛНЕНИЕМ (CANCELLED/EXPIRED с
+            executed_lots>0, FILL при исполнении меньше запрошенного) остаются
+            доступны для повторной сверки (order_ledger.open_orders) — поздний
+            рост lots_executed после терминального статуса не теряется;
+            повторная регистрация уже применённого исполнения без активной
+            позиции запрещена («воскрешение» закрытой позиции).
+        """
+        for rec in list(ledger.open_orders(side="BUY")):
+            order_id = rec["order_id"]
+            figi = rec.get("figi") or ""
+            ticker = rec.get("ticker") or figi or "?"
+    
+            # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи.
+>           state = await _poll_ledger_order_state(client, rec)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+main.py:4210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e87786ea0>
+rec = {'avg_exec_price': None, 'commission': None, 'created_at_utc': '2026-11-25T16:16:01.640498+00:00', 'error': None, ...}
+
+    async def _poll_ledger_order_state(client: TinkoffClient, rec: dict):
+        """ЭТАП 5Б (§5.3/§5.4): статус заявки из записи реестра с ЯВНЫМ типом
+        идентификатора.
+    
+        Записи, созданные роботом (record_intent ДО отправки), имеют
+        order_request_id == order_id (клиентский UUID) — опрос строго по
+        ORDER_ID_TYPE_REQUEST. Клиентский UUID НИКОГДА не передаётся как
+        биржевой ID.
+    
+        Записи без order_request_id (legacy / неизвестные заявки брокера,
+        ключенные биржевым ID) опрашиваются по-прежнему — без order_id_type,
+        чтобы не менять их поведение без подтверждения требуемого типа.
+    
+        None — состояние НЕИЗВЕСТНО: вызывающий код не трактует его как отказ
+        (fail-closed, как и прежде)."""
+        oid = str(rec.get("order_id") or "")
+        if not oid:
+            return None
+        if rec.get("order_request_id"):
+            # запись робота: ключ — клиентский UUID (ORDER_ID_TYPE_REQUEST)
+>           return await client.get_sandbox_order_state(oid, order_id_type="REQUEST")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: FakeClient.get_sandbox_order_state() got an unexpected keyword argument 'order_id_type'
+
+main.py:708: TypeError
+______ test_p05_4_successful_reconcile_allows_resolution_no_side_effects _______
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_p05_4_successful_reconcil0'))
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3e8778ddf0>
+
+    @pytest.mark.asyncio
+    async def test_p05_4_successful_reconcile_allows_resolution_no_side_effects(env, monkeypatch):
+        """P0-5 (5)+(6). Успешный reconcile() с подтверждённым остатком
+        позволяет штатно разрешить неопределённость: последующий повторный
+        опрос с тем же lots_executed закрывает UNCERTAIN-запись терминальным
+        статусом брокера и снимает блокировку FIGI; количество позиции не
+        меняется, дубликат позиции не создаётся, повторные опросы стабильны."""
+>       ledger, client, monitor, oid = await _p05_setup_ambiguity(env, monkeypatch)
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test_p0_batch2_late_execution.py:911: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_p05_4_successful_reconcil0'))
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f3e8778ddf0>
+oid = 'oid-p05'
+
+    async def _p05_setup_ambiguity(env, monkeypatch, oid="oid-p05"):
+        """Общая подготовка сценария P0-5:
+          фаза 1: исполнение 8 лотов без свечей -> RECOVERY 8/8/8;
+          фаза 2: достоверная сверка портфеля: остаток 7 (снимок мог уже
+                  включать поздние лоты) — маркер подтверждённой сверки
+                  выставляется ДО появления UNCERTAIN;
+          фаза 3: неоднозначный рост lots_executed 8 -> 10 ПОСЛЕ достоверной
+                  синхронизации остатка снимком -> UNCERTAIN-запись реестра,
+                  FIGI заблокирован, quantity остаётся 7.
+        Возвращает (ledger, client, monitor, oid)."""
+        # raising=False: маркер существует только в коде с фиксом P0-5 — на коде
+        # без фикса атрибут создаётся как None (демонстрация дефекта честная:
+        # падают только тесты, проверяющие перезапись UNCERTAIN).
+        monkeypatch.setattr(main, "_last_reconcile_confirmed_utc", None, raising=False)
+        ledger = make_ledger(env.tmp_path)
+        client = FakeClient(positions={})
+        ledger.record_intent(oid, trade_id="t-p05", figi=FIGI, ticker=TICKER,
+                             side="BUY", requested_lots=10)
+        monitor = ExecutionMonitor(client)
+    
+        # фаза 1: RECOVERY 8/8/8
+        client.order_states[oid] = fake_state(CANCELLED, lots_executed=8, price_units=800)
+>       await main.poll_open_orders(client, monitor, FakeRM(), ledger)
+
+test_p0_batch2_late_execution.py:778: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e8778dfd0>
+monitor = <execution.ExecutionMonitor object at 0x7f3e8778ce90>
+rm = <tests.test_p0_defect_fixes.FakeRM object at 0x7f3e8778d610>
+ledger = <order_ledger.OrderLedger object at 0x7f3e8778e630>
+
+    async def poll_open_orders(client: TinkoffClient, monitor: ExecutionMonitor,
+                               rm: RiskManager, ledger: OrderLedger):
+        """
+        Пошаговый (по одной заявке за цикл, без блокировки цикла) контроль
+        незавершённых BUY-заявок из реестра (этап 5).
+    
+        Правила разрешения:
+          - терминальный статус с исполнением -> регистрация через единую точку
+            (RECOVERY при неполных данных); для CANCELLED/EXPIRED с исполненными
+            лотами статус заявки сохраняется как CANCELLED/EXPIRED с частичным
+            исполнением (дефект №2: статус и факт исполнения учитываются
+            раздельно, в позицию идёт только реально исполненное количество);
+          - FILL с lots_executed=0 — противоречие: UNCERTAIN, НЕ терминальный
+            FILL, НЕ отказ (дефект №8);
+          - терминальный статус БЕЗ исполнения (достоверное подтверждение брокера)
+            -> заявка закрыта в реестре, BUY по FIGI разблокируется;
+          - статус недоступен/заявка не найдена -> НЕ отказ: заявка остаётся в
+            реестре (UNCERTAIN-логика), новые BUY по FIGI блокированы;
+          - PARTIALLYFILL или NEW старше ORDER_POLL_MAX_AGE_CYCLES -> сначала
+            регистрация подтверждённых лотов, затем отмена остатка (дефект №1);
+          - заявки с неизвестной стороной (side=None) опрашиваются: завершение
+            без исполнения разрешает блокировку; признаки исполнения при
+            неизвестной стороне остаются UNCERTAIN для оператора (дефект №4);
+          - партия P0-2: терминальные заявки С ИСПОЛНЕНИЕМ (CANCELLED/EXPIRED с
+            executed_lots>0, FILL при исполнении меньше запрошенного) остаются
+            доступны для повторной сверки (order_ledger.open_orders) — поздний
+            рост lots_executed после терминального статуса не теряется;
+            повторная регистрация уже применённого исполнения без активной
+            позиции запрещена («воскрешение» закрытой позиции).
+        """
+        for rec in list(ledger.open_orders(side="BUY")):
+            order_id = rec["order_id"]
+            figi = rec.get("figi") or ""
+            ticker = rec.get("ticker") or figi or "?"
+    
+            # ЭТАП 5Б (§5.3): опрос с ЯВНЫМ типом идентификатора записи.
+>           state = await _poll_ledger_order_state(client, rec)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+main.py:4210: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <tests.test_p0_defect_fixes.FakeClient object at 0x7f3e8778dfd0>
+rec = {'avg_exec_price': None, 'commission': None, 'created_at_utc': '2026-11-25T16:16:01.749395+00:00', 'error': None, ...}
+
+    async def _poll_ledger_order_state(client: TinkoffClient, rec: dict):
+        """ЭТАП 5Б (§5.3/§5.4): статус заявки из записи реестра с ЯВНЫМ типом
+        идентификатора.
+    
+        Записи, созданные роботом (record_intent ДО отправки), имеют
+        order_request_id == order_id (клиентский UUID) — опрос строго по
+        ORDER_ID_TYPE_REQUEST. Клиентский UUID НИКОГДА не передаётся как
+        биржевой ID.
+    
+        Записи без order_request_id (legacy / неизвестные заявки брокера,
+        ключенные биржевым ID) опрашиваются по-прежнему — без order_id_type,
+        чтобы не менять их поведение без подтверждения требуемого типа.
+    
+        None — состояние НЕИЗВЕСТНО: вызывающий код не трактует его как отказ
+        (fail-closed, как и прежде)."""
+        oid = str(rec.get("order_id") or "")
+        if not oid:
+            return None
+        if rec.get("order_request_id"):
+            # запись робота: ключ — клиентский UUID (ORDER_ID_TYPE_REQUEST)
+>           return await client.get_sandbox_order_state(oid, order_id_type="REQUEST")
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: FakeClient.get_sandbox_order_state() got an unexpected keyword argument 'order_id_type'
+
+main.py:708: TypeError
+_______________ test_16_request_lookup_unavailable_fails_closed ________________
+
+env = namespace(tmp_path=PosixPath('/tmp/pytest-of-z/pytest-23/test_16_request_lookup_unavail0'), ledger=<order_ledger.OrderLedger object at 0x7f3e729f28a0>, monkeypatch=<_pytest.monkeypatch.MonkeyPatch object at 0x7f3e729f1a30>)
+
+    def test_16_request_lookup_unavailable_fails_closed(env):
+        """Сценарий 16: невозможность запроса по REQUEST приводит к
+        fail-closed (состояние НЕИЗВЕСТНО, позиция UNCERTAIN), а не к ложному
+        NOT_FOUND."""
+        # 16a: SDK не позволяет запрос по REQUEST — клиент возвращает None,
+        # сетевой вызов НЕ выполняется (никакой имитации успешного поиска).
+        import tinkoff_client
+>       saved_enum = tinkoff_client.Order_id_type
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: module 'tinkoff_client' has no attribute 'Order_id_type'. Did you mean: 'OrderIdType'?
+
+test_p0_sell_id_fixes.py:699: AttributeError
+=========================== short test summary info ============================
+FAILED test_p0_batch2_late_execution.py::test_n1_no_premotion_while_order_alive
+FAILED test_p0_batch2_late_execution.py::test_n1_promotion_only_at_terminal_syncs_final_quantity
+FAILED test_p0_batch2_late_execution.py::test_n4_late_growth_after_terminal_cancelled_actually_repolled
+FAILED test_p0_batch2_late_execution.py::test_integration_trading_cycle_partial_cancel_recovery_open_late_lots
+FAILED test_p0_batch2_late_execution.py::test_p03_1_repeated_buy_report_does_not_restore_sold_lots
+FAILED test_p0_batch2_late_execution.py::test_p03_2_stale_buy_report_contradiction_blocks_buy
+FAILED test_p0_batch2_late_execution.py::test_p04_reconcile_before_poll_no_reapply_of_late_lots
+FAILED test_p0_batch2_late_execution.py::test_p05_1_first_ambiguous_growth_sets_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_2_repeated_same_lots_poll_keeps_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_3_failed_or_contradictory_reconcile_keeps_uncertain
+FAILED test_p0_batch2_late_execution.py::test_p05_4_successful_reconcile_allows_resolution_no_side_effects
+FAILED test_p0_sell_id_fixes.py::test_16_request_lookup_unavailable_fails_closed
+12 failed, 31 passed in 1.79s
+=== EXIT CODE: 1 ===

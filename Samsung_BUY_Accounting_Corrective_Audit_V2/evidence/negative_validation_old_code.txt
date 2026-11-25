@@ -1,0 +1,35 @@
+=== NEGATIVE VALIDATION: новые тесты FIX-1 на СТАРОМ коде (BASELINE = кандидат без исправлений) ===
+Команда: cd BASELINE && PYTHONPATH=. python3 -m pytest test_corrective_audit_v2.py -q --tb=short
+Ожидание: тесты A/B/F (fail-closed режимы) ПАДАЮТ на старом коде — подтверждают, что тесты проверяют именно исправление.
+
+FF....F...........                                                       [100%]
+=================================== FAILURES ===================================
+________________ test_fix1_a_save_failure_no_false_confirmation ________________
+test_corrective_audit_v2.py:182: in test_fix1_a_save_failure_no_false_confirmation
+    assert ok is False, "при ошибке сохранения успех сообщать запрещено"
+E   AssertionError: при ошибке сохранения успех сообщать запрещено
+E   assert True is False
+----------------------------- Captured stderr call -----------------------------
+2026-11-25 16:41:33,200 - ERROR - [state] _save_state не удался — новые входы заблокированы до успешного сохранения
+------------------------------ Captured log call -------------------------------
+ERROR    root:main.py:1180 [state] _save_state не удался — новые входы заблокированы до успешного сохранения
+______________ test_fix1_b_invalid_exec_price_no_partial_mutation ______________
+test_corrective_audit_v2.py:216: in test_fix1_b_invalid_exec_price_no_partial_mutation
+    assert pos.entry_actual_commission is None, (
+E   AssertionError: частичная мутация: комиссия осталась при невалидной цене
+E   assert 1.5 is None
+E    +  where 1.5 = TrackedPosition(figi='BBG00CORRECTV1', ticker='TEST', direction='BUY', entry_price=100.0, quantity=10, sl_price=98.0, ...rice=0.0, mae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=False, close_order_request_id=None).entry_actual_commission
+_____________ test_fix1_f_retry_after_save_failure_no_double_apply _____________
+test_corrective_audit_v2.py:367: in test_fix1_f_retry_after_save_failure_no_double_apply
+    assert ok1 is False
+E   assert True is False
+----------------------------- Captured stderr call -----------------------------
+2026-11-25 16:41:33,260 - ERROR - [state] _save_state не удался — новые входы заблокированы до успешного сохранения
+------------------------------ Captured log call -------------------------------
+ERROR    root:main.py:1180 [state] _save_state не удался — новые входы заблокированы до успешного сохранения
+=========================== short test summary info ============================
+FAILED test_corrective_audit_v2.py::test_fix1_a_save_failure_no_false_confirmation
+FAILED test_corrective_audit_v2.py::test_fix1_b_invalid_exec_price_no_partial_mutation
+FAILED test_corrective_audit_v2.py::test_fix1_f_retry_after_save_failure_no_double_apply
+3 failed, 15 passed in 0.50s
+exit=1
