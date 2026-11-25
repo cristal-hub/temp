@@ -1,0 +1,28 @@
+============================= test session starts ==============================
+collecting ... collected 23 items
+
+test_buy_accounting_audit.py::test_tz01_full_buy_registers_open_position PASSED [  4%]
+test_buy_accounting_audit.py::test_tz02_repeated_terminal_report_no_reaccounting PASSED [  8%]
+test_buy_accounting_audit.py::test_tz03_partial_buy_counts_only_executed PASSED [ 13%]
+test_buy_accounting_audit.py::test_tz04_multiple_partials_final_quantity_correct PASSED [ 17%]
+test_buy_accounting_audit.py::test_tz05_restart_after_fill_before_position_saved PASSED [ 21%]
+test_buy_accounting_audit.py::test_tz06_ledger_saved_state_missing_safe_recovery PASSED [ 26%]
+test_buy_accounting_audit.py::test_tz07_state_saved_ledger_missing_safe PASSED [ 30%]
+test_buy_accounting_audit.py::test_tz08_late_commission_enriches_existing_entry PASSED [ 34%]
+test_buy_accounting_audit.py::test_tz09_zero_commission_distinguished_from_missing PASSED [ 39%]
+test_buy_accounting_audit.py::test_tz10_late_execution_price_enriches_recovery PASSED [ 43%]
+test_buy_accounting_audit.py::test_tz11_contradictory_repeat_fail_closed PASSED [ 47%]
+test_buy_accounting_audit.py::test_tz12_two_orders_same_figi_not_mixed PASSED [ 52%]
+test_buy_accounting_audit.py::test_tz13_two_different_figis_not_mixed PASSED [ 56%]
+test_buy_accounting_audit.py::test_tz14_broker_filled_no_local_position_recovery_no_double PASSED [ 60%]
+test_buy_accounting_audit.py::test_tz15_existing_recovery_not_duplicated_by_reconcile PASSED [ 65%]
+test_buy_accounting_audit.py::test_tz16_state_write_error_no_false_registration_confirmation PASSED [ 69%]
+test_buy_accounting_audit.py::test_tz17_ledger_write_error_no_false_confirmation PASSED [ 73%]
+test_buy_accounting_audit.py::test_tz18_late_report_after_restart_idempotent PASSED [ 78%]
+test_buy_accounting_audit.py::test_tz19_csv_reupdate_no_duplicates_no_history_loss PASSED [ 82%]
+test_buy_accounting_audit.py::test_tz20_cumulative_recomputed_after_buy_metadata_update PASSED [ 86%]
+test_buy_accounting_audit.py::test_wush_synthetic_buy495_recovery PASSED [ 91%]
+test_buy_accounting_audit.py::test_ledger_identity_conflict_figi_change_fail_closed PASSED [ 95%]
+test_buy_accounting_audit.py::test_ledger_price_not_wiped_by_later_record PASSED [100%]
+
+============================== 23 passed in 0.27s ==============================
