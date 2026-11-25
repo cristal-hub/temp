@@ -1,0 +1,10 @@
+{
+  "positions": {},
+  "closed_entry_order_ids": [],
+  "pending_csv_recoveries": [],
+  "monitoring_error": false,
+  "risk": {
+    "fake": true
+  },
+  "open_orders": []
+}

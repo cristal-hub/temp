@@ -1,0 +1,47 @@
+# SHA256SUMS — BUY ACCOUNTING AUDIT v1 (каталог samsung_BUY_accounting_audit_v1)
+# База сравнения: Samsung cristal-hub-Tsclp_v2.1_volatile_Samsung @ 051b10f095d45c053492ca333449a9a9f518f33f
+# Основание: кандидат samsung_B2_integrated_v1_v7 (B2 CLOSE ACCOUNTING v1-v7, сохранён без изменений)
+# Формат: sha256  <путь относительно корня каталога аудита>
+# --- Production-файлы кандидата (B2 + BUY-фиксы) ---
+9cad7d500782c5a908f128f0e95e982eb6eab26750f94854e78d09edb313c772  main.py
+03cec03b5015c390573d5f3bb30198cc7605a99669b8118e62361605ee561764  execution.py
+df22ed916cb2eda10473cb78c2f93846d0be00c8a7ad5913a6bab8d9ee8ad4c5  logger.py
+0bdb34231d96be99bfde8e60a3b68cfe194523c8f494dd847be67c9195ac953d  order_ledger.py
+# --- Изменённые тестовые файлы (FIX-5) ---
+c233da57ab4ca29c4afe6552751277068e48161b02e1fae4c5db05b976ff7f11  test_commission.py
+c233da57ab4ca29c4afe6552751277068e48161b02e1fae4c5db05b976ff7f11  tests/test_commission.py
+# --- Новые BUY-тесты (этот аудит) ---
+98a2a3b0c387962815dcfbdfa5b777e8025e7794b46763da8ba971f5508b1f4a  test_buy_accounting_audit.py
+# --- Точный diff кандидат B2 -> каталог аудита ---
+5f01a61b75f2e201b080a8e2d13130135fa40fa3eff1a331a23dce9151b40dfa  BUY_DIFF_vs_B2_candidate.patch
+# --- Итоговые отчёты и артефакты аудита ---
+a0c363afccf216a84c51cbf1859d2c7e683fc28c9a45067d288c503ed5158a3f  README.md
+8d692b32d9d04fc2ee5581d9e0411901ae8410e1121f55f2a902f08aed5a74d7  AUDIT_REPORT.md
+4bdeda491d5c47083f1bd6d4fc74dfe920eabdc171ee288321313dc6e2b7bba9  ROOT_CAUSE_ANALYSIS.md
+324d4f5a44de634c80423f4dd6c97832f9d50e1479edc823d135a1f0f959bfea  CHANGED_FILES.md
+f62249a44cb4c9368ef3a475f6ac2d102eb28aaeb5c7ff4f0cbfb5b9b3bbb4ff  REGRESSION_COMPARISON.md
+a1fb46705b1df1a53d6f63300a07c725500faa1703eb16e8e353369b1f7bb5d6  BUY_TEST_RESULTS.txt
+758501e11bbced7bea467e914d672b3439827735bb19409ac2b77aa8ce0ac4da  B2_TEST_RESULTS.txt
+6fababea07e894253f6cf7463583142e378f28ae2fd9369a768164e3841a45a9  FULL_PYTEST_BASELINE.txt
+d6d66835f5a9affbe33653d6c433b7c05fc4306384709d429fc6aae735e48e2b  FULL_PYTEST_FINAL.txt
+e22e1fb2a1dda107d479dc9b583bd8d7c6d30e959461a23cfad200dbc8401fa5  NEGATIVE_VALIDATION_BUY_TESTS.txt
+be3adce7c063ba3e84ab836ae0dd4529b5aedc42d1f72f2ded2cabefb6d6b09e  BUY_DIFF_code_only_vs_B2_candidate.patch
+# --- ZIP-архив всего каталога (полный комплект; создаётся последним, его SHA — в final reply) ---
+# --- Контроль неизменности B2-документации кандидата (appendix-копии) ---
+ed904738a0753722bc61a11080cac33c61276bb9127c0b9b4658ae0fa98a69b2  appendix_README_B2_v1_v7.md
+0020f8a55a7c617416816d5371cd785e5a6f7949439f0606afb8fdf6679cf691  appendix_CHANGED_FILES_B2_v1_v7.md
+59b50915e04de894eae32384248a55db733df15b73217d668267e7c8fb0e68ad  appendix_FULL_DIFF_B2_v1_v7.patch
+af8e4749997a97e3698ab8ed6dc2a5011c6691f1f4c182762495bb576e5a00e7  appendix_SHA256SUMS_B2_v1_v7.txt
+3a8170f4c24801d5fe65f698d99d49d6eb8652ee719cacc41a812fcb41b05433  appendix_TEST_RESULTS_B2_v1_v7.txt
+# --- Исходные SHA256 Samsung 051b10f (ДО аудита) ---
+# main.py         8ed2293bb88bb96b196b451ff0dc468d9fdc96a856634907f5ee9191f2df6be6
+# execution.py    72b19783d1d1e811e51c7522ba60f524ecffb7b57f393c34efd2c033680d40d2
+# logger.py       266c937e2946058e6255b6584aee5c26e4e34dadaffeffe755eca7435924f164
+# order_ledger.py 766e1f3707cb60fa699f9d76b913ff0215a9dd80a363b5505d50310dcc591f4e
+# strategy.py     43906866a226aabae0fff266dde77d88345ae27f87b0948689929aa37171537f (не изменён)
+# risk_manager.py d1c72c2ee09dc877803661c25028442413ffc13b2b9168efa59f99255e5982b8 (не изменён)
+# config.py       6c4df6e4768b31b78e1daa1cbbe0e2961d5de68918f5856888e2c1be8422afae (не изменён)
+# screener.py     6db12eb1da4434fba2bb9997a676b86b7431b67bb0f9ae1e85b56db11d8341c9 (не изменён)
+# tinkoff_client.py fe69b045e9ec3d415c43e71a0effe62fbfb38d2309d30c01d0b1d03155b569d7 (не изменён)
+# telegram_bot.py 8a98ab4c5b5fe5070813e3ac4bf0f57f592c0d9ce5483df826ad1f2cd1ca1f6e (не изменён)
+# close_all_positions.py a0864e2425f732ff20503210f42e38830c5d273da4907b383b57af047e38108a (не изменён)
