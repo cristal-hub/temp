@@ -1,0 +1,366 @@
+.......FFFF........F.FF                                                  [100%]
+=================================== FAILURES ===================================
+______________ test_tz08_late_commission_enriches_existing_entry _______________
+
+env_audit = PosixPath('/tmp/pytest-of-z/pytest-25/test_tz08_late_commission_enri0')
+
+    def test_tz08_late_commission_enriches_existing_entry(env_audit):
+        tmp = env_audit
+        ledger = make_ledger(tmp)
+        ledger.record_sent(OID, trade_id="t1", figi=FIGI, ticker=TICKER, side="BUY",
+                           requested_lots=10, executed_lots=10, status_hint="FILL",
+                           avg_exec_price=100.5, source="post_response")
+        client = FakeClient()
+        monitor = make_monitor(client)
+        rm = FakeRM()
+        pos = run(main.register_executed_buy(
+            client, monitor, rm, ledger, figi=FIGI, ticker=TICKER, order_id=OID,
+            trade_id="t1", reason="unit", signal_time="", price_before_order=100.0,
+            order_send_time="", requested_lots=10, executed_lots=10,
+            exec_price=100.5, lot_size=1, entry_commission=None, partial=False,
+            df=object(), source="audit", ledger_status="FILL"))
+        assert pos.entry_actual_commission is None, "первый отчёт без комиссии"
+        qty_before = pos.quantity
+        # поздний отчёт той же заявки с фактической комиссией
+        pos2 = run(main.register_executed_buy(
+            client, monitor, rm, ledger, figi=FIGI, ticker=TICKER, order_id=OID,
+            trade_id="t1", reason="unit", signal_time="", price_before_order=100.0,
+            order_send_time="", requested_lots=10, executed_lots=10,
+            exec_price=100.5, lot_size=1, entry_commission=1.5, partial=False,
+            df=object(), source="audit", ledger_status="FILL"))
+        assert pos2 is pos and pos2.quantity == qty_before
+>       assert pos2.entry_actual_commission == 1.5, (
+            "поздняя комиссия обогащает существующую запись, а не теряется")
+E       AssertionError: поздняя комиссия обогащает существующую запись, а не теряется
+E       assert None == 1.5
+E        +  where None = TrackedPosition(figi='BBG00WUSHBUY1', ticker='WUSH', direction='BUY', entry_price=100.5, quantity=10, sl_price=95.0, t...ce=110.0, mae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=False, close_order_request_id=None).entry_actual_commission
+
+test_buy_accounting_audit.py:472: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-25 13:35:52,416 - INFO - [execution] OPEN WUSH qty=10 entry=100.5 sl=95.0 tp=110.0
+2026-11-25 13:35:52,417 - INFO - 🚀 [BUY] WUSH 10 лот. @ 100.5000 SL=95.0000 TP=110.0000 entry_comm=model (reason: unit)
+2026-11-25 13:35:52,417 - INFO - [notify] 🚀 <b>WUSH</b> BUY
+Исполнено: 10 лот. @ 100.5000
+SL: 95.0000
+TP: 110.0000
+<i>unit</i>
+2026-11-25 13:35:52,417 - WARNING - [register] WUSH: активная позиция уже есть (state=OPEN, order=buy-audit-oid-1) — дубль не создаётся (order_id=buy-audit-oid-1)
+------------------------------ Captured log call -------------------------------
+INFO     root:execution.py:490 [execution] OPEN WUSH qty=10 entry=100.5 sl=95.0 tp=110.0
+INFO     root:main.py:3955 🚀 [BUY] WUSH 10 лот. @ 100.5000 SL=95.0000 TP=110.0000 entry_comm=model (reason: unit)
+INFO     root:main.py:900 [notify] 🚀 <b>WUSH</b> BUY
+Исполнено: 10 лот. @ 100.5000
+SL: 95.0000
+TP: 110.0000
+<i>unit</i>
+WARNING  root:main.py:3462 [register] WUSH: активная позиция уже есть (state=OPEN, order=buy-audit-oid-1) — дубль не создаётся (order_id=buy-audit-oid-1)
+_____________ test_tz09_zero_commission_distinguished_from_missing _____________
+
+env_audit = PosixPath('/tmp/pytest-of-z/pytest-25/test_tz09_zero_commission_dist0')
+
+    def test_tz09_zero_commission_distinguished_from_missing(env_audit):
+        tmp = env_audit
+        ledger = make_ledger(tmp)
+        ledger.record_sent(OID, trade_id="t1", figi=FIGI, ticker=TICKER, side="BUY",
+                           requested_lots=10, executed_lots=10, status_hint="FILL",
+                           avg_exec_price=100.5, source="post_response")
+        client = FakeClient()
+        monitor = make_monitor(client)
+        rm = FakeRM()
+        state = fake_state(FILL, 10, price_total=1005.0, commission=0.0)
+        exec_price = ExecutionMonitor._extract_price(state, 10, 1)
+        commission = ExecutionMonitor._extract_commission(state)
+        assert exec_price is not None
+>       assert commission == 0.0, (
+            "commission=0 в отчёте — ДОСТОВЕРНОЕ значение, а не отсутствие данных")
+E       AssertionError: commission=0 в отчёте — ДОСТОВЕРНОЕ значение, а не отсутствие данных
+E       assert None == 0.0
+
+test_buy_accounting_audit.py:492: AssertionError
+_______________ test_tz10_late_execution_price_enriches_recovery _______________
+
+env_audit = PosixPath('/tmp/pytest-of-z/pytest-25/test_tz10_late_execution_price0')
+
+    def test_tz10_late_execution_price_enriches_recovery(env_audit):
+        tmp = env_audit
+        ledger = make_ledger(tmp)
+        ledger.record_sent(OID, trade_id="t1", figi=FIGI, ticker=TICKER, side="BUY",
+                           requested_lots=5, executed_lots=5, status_hint="FILL",
+                           source="post_response")
+        client = FakeClient()
+        monitor = make_monitor(client)
+        rm = FakeRM()
+        # первый отчёт без цены -> RECOVERY с неизвестной ценой входа
+        pos = run(main.register_executed_buy(
+            client, monitor, rm, ledger, figi=FIGI, ticker=TICKER, order_id=OID,
+            trade_id="t1", reason="unit", signal_time="", price_before_order=100.0,
+            order_send_time="", requested_lots=5, executed_lots=5,
+            exec_price=None, lot_size=1, entry_commission=None, partial=False,
+            df=None, source="audit", ledger_status="FILL"))
+        assert pos.state == PositionState.RECOVERY
+        assert pos.execution_price is None
+        # поздний отчёт той же заявки с ценой исполнения
+        pos2 = run(main.register_executed_buy(
+            client, monitor, rm, ledger, figi=FIGI, ticker=TICKER, order_id=OID,
+            trade_id="t1", reason="unit", signal_time="", price_before_order=100.0,
+            order_send_time="", requested_lots=5, executed_lots=5,
+            exec_price=205.25, lot_size=1, entry_commission=None, partial=False,
+            df=None, source="audit", ledger_status="FILL"))
+        assert pos2 is pos
+>       assert pos2.execution_price == 205.25, (
+            "поздняя цена исполнения обогащает существующую RECOVERY-запись")
+E       AssertionError: поздняя цена исполнения обогащает существующую RECOVERY-запись
+E       assert None == 205.25
+E        +  where None = TrackedPosition(figi='BBG00WUSHBUY1', ticker='WUSH', direction='BUY', entry_price=0.0, quantity=5, sl_price=0.0, tp_pr...rice=0.0, mae_price=0.0, mfe_price=0.0, breakeven_moved=False, exit_price_confirmed=False, close_order_request_id=None).execution_price
+
+test_buy_accounting_audit.py:548: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-25 13:35:52,486 - WARNING - [execution] RECOVERY WUSH qty=5 source=no_price
+2026-11-25 13:35:52,487 - INFO - [notify] ⚠️ <b>WUSH</b> BUY исполнен (5 лот.), цена входа/SL/TP уточняются
+Позиция зарегистрирована как RECOVERY — контроль сохранён, автозакрытие отключено.
+2026-11-25 13:35:52,487 - WARNING - [register] WUSH: активная позиция уже есть (state=RECOVERY, order=buy-audit-oid-1) — дубль не создаётся (order_id=buy-audit-oid-1)
+------------------------------ Captured log call -------------------------------
+WARNING  root:execution.py:530 [execution] RECOVERY WUSH qty=5 source=no_price
+INFO     root:main.py:900 [notify] ⚠️ <b>WUSH</b> BUY исполнен (5 лот.), цена входа/SL/TP уточняются
+Позиция зарегистрирована как RECOVERY — контроль сохранён, автозакрытие отключено.
+WARNING  root:main.py:3462 [register] WUSH: активная позиция уже есть (state=RECOVERY, order=buy-audit-oid-1) — дубль не создаётся (order_id=buy-audit-oid-1)
+__________________ test_tz11_contradictory_repeat_fail_closed __________________
+
+env_audit = PosixPath('/tmp/pytest-of-z/pytest-25/test_tz11_contradictory_repeat0')
+
+    def test_tz11_contradictory_repeat_fail_closed(env_audit):
+        tmp = env_audit
+        ledger = make_ledger(tmp)
+        ledger.record_sent(OID, trade_id="t1", figi=FIGI, ticker=TICKER, side="BUY",
+                           requested_lots=10, executed_lots=10, status_hint="FILL",
+                           avg_exec_price=100.5, source="post_response")
+        client = FakeClient()
+        monitor = make_monitor(client)
+        rm = FakeRM()
+        pos = run(main.register_executed_buy(
+            client, monitor, rm, ledger, figi=FIGI, ticker=TICKER, order_id=OID,
+            trade_id="t1", reason="unit", signal_time="", price_before_order=100.0,
+            order_send_time="", requested_lots=10, executed_lots=10,
+            exec_price=100.5, lot_size=1, entry_commission=1.0, partial=False,
+            df=object(), source="audit", ledger_status="FILL"))
+        saved_comm = pos.entry_actual_commission
+        # противоречивый повтор: та же заявка, ДРУГАЯ комиссия
+        run(main.register_executed_buy(
+            client, monitor, rm, ledger, figi=FIGI, ticker=TICKER, order_id=OID,
+            trade_id="t1", reason="unit", signal_time="", price_before_order=100.0,
+            order_send_time="", requested_lots=10, executed_lots=10,
+            exec_price=100.5, lot_size=1, entry_commission=9.9, partial=False,
+            df=object(), source="audit", ledger_status="FILL"))
+        assert pos.entry_actual_commission == saved_comm, (
+            "подтверждённое значение не перезаписывается противоречивым")
+>       assert client.uncertain_state is True, (
+            "противоречие фиксируется как неопределённость (fail-closed)")
+E       AssertionError: противоречие фиксируется как неопределённость (fail-closed)
+E       assert False is True
+E        +  where False = <samsung_BUY_accounting_audit_v1.test_buy_accounting_audit.FakeClient object at 0x7f0d541d4ce0>.uncertain_state
+
+test_buy_accounting_audit.py:581: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-25 13:35:52,504 - INFO - [execution] OPEN WUSH qty=10 entry=100.5 sl=95.0 tp=110.0
+2026-11-25 13:35:52,505 - INFO - 🚀 [BUY] WUSH 10 лот. @ 100.5000 SL=95.0000 TP=110.0000 entry_comm=1.0 (reason: unit)
+2026-11-25 13:35:52,505 - INFO - [notify] 🚀 <b>WUSH</b> BUY
+Исполнено: 10 лот. @ 100.5000
+SL: 95.0000
+TP: 110.0000
+<i>unit</i>
+2026-11-25 13:35:52,505 - WARNING - [register] WUSH: активная позиция уже есть (state=OPEN, order=buy-audit-oid-1) — дубль не создаётся (order_id=buy-audit-oid-1)
+------------------------------ Captured log call -------------------------------
+INFO     root:execution.py:490 [execution] OPEN WUSH qty=10 entry=100.5 sl=95.0 tp=110.0
+INFO     root:main.py:3955 🚀 [BUY] WUSH 10 лот. @ 100.5000 SL=95.0000 TP=110.0000 entry_comm=1.0 (reason: unit)
+INFO     root:main.py:900 [notify] 🚀 <b>WUSH</b> BUY
+Исполнено: 10 лот. @ 100.5000
+SL: 95.0000
+TP: 110.0000
+<i>unit</i>
+WARNING  root:main.py:3462 [register] WUSH: активная позиция уже есть (state=OPEN, order=buy-audit-oid-1) — дубль не создаётся (order_id=buy-audit-oid-1)
+__________ test_tz20_cumulative_recomputed_after_buy_metadata_update ___________
+
+env_audit = PosixPath('/tmp/pytest-of-z/pytest-25/test_tz20_cumulative_recompute0')
+
+    def test_tz20_cumulative_recomputed_after_buy_metadata_update(env_audit):
+        tmp = env_audit
+        ledger = make_ledger(tmp)
+        client = FakeClient()
+        monitor = make_monitor(client)
+        rm = FakeRM()
+        # сделка 1: BUY 10 с поздней комиссией, затем закрытие с ценой
+        ledger.record_sent(OID, trade_id="t-n1", figi=FIGI, ticker=TICKER,
+                           side="BUY", requested_lots=10, executed_lots=10,
+                           status_hint="FILL", avg_exec_price=100.0,
+                           source="post_response")
+        pos1 = run(main.register_executed_buy(
+            client, monitor, rm, ledger, figi=FIGI, ticker=TICKER, order_id=OID,
+            trade_id="t-n1", reason="unit", signal_time="",
+            price_before_order=100.0, order_send_time="", requested_lots=10,
+            executed_lots=10, exec_price=100.0, lot_size=1, entry_commission=None,
+            partial=False, df=object(), source="audit", ledger_status="FILL"))
+        monitor.add_close_order(pos1, "sell-n1", 10)
+        pos1.close_order_request_id = "sell-n1"
+        pos1.close_requested_lots = 10
+        assert monitor.apply_close_execution(
+            pos1, "sell-n1", 10, "CANCELLED", execution_price=110.0,
+            commission=None, requested_lots=10) is True
+        # сделка 2 (другой FIGI): полная, чтобы был «последующий» cumulative
+        ledger.record_sent(OID_B, trade_id="t-n2", figi=FIGI2, ticker="X",
+                           side="BUY", requested_lots=5, executed_lots=5,
+                           status_hint="FILL", avg_exec_price=50.0,
+                           source="post_response")
+        pos2 = run(main.register_executed_buy(
+            client, monitor, rm, ledger, figi=FIGI2, ticker="X", order_id=OID_B,
+            trade_id="t-n2", reason="unit", signal_time="",
+            price_before_order=50.0, order_send_time="", requested_lots=5,
+            executed_lots=5, exec_price=50.0, lot_size=1, entry_commission=None,
+            partial=False, df=object(), source="audit", ledger_status="FILL"))
+        monitor.add_close_order(pos2, "sell-n2", 5)
+        pos2.close_order_request_id = "sell-n2"
+        pos2.close_requested_lots = 5
+        assert monitor.apply_close_execution(
+            pos2, "sell-n2", 5, "CANCELLED", execution_price=55.0,
+            commission=None, requested_lots=5) is True
+        # закрываем обе: две CSV-строки с накопительным P&L
+        close_client = FakeClient()
+        close_client.order_states["sell-n1"] = fake_state(CANCELLED, 10,
+                                                          price_total=1100.0)
+        close_client.order_states["sell-n2"] = fake_state(CANCELLED, 5,
+                                                          price_total=275.0)
+        run(main.process_closing(close_client, monitor, None))
+        rows = read_trades_csv(tmp)
+        assert len(rows) == 2
+        cum2_before = rows[1]["cumulative_net_pnl_rub"]
+        assert rows[0]["entry_commission_rub"] != "", "entry-комиссия модельная"
+        assert rows[0]["actual_commission_rub"] == ""
+        # --- поздний отчёт BUY-заявки сделки 1 с фактической комиссией ---
+        run(main.register_executed_buy(
+            client, monitor, rm, ledger, figi=FIGI, ticker=TICKER, order_id=OID,
+            trade_id="t-n1", reason="unit", signal_time="",
+            price_before_order=100.0, order_send_time="", requested_lots=10,
+            executed_lots=10, exec_price=100.0, lot_size=1, entry_commission=2.0,
+            partial=False, df=object(), source="audit", ledger_status="FILL"))
+        # recovery-цикл обновляет существующую строку и пересчитывает последующие
+        run(main.process_closing(close_client, monitor, None))
+        rows = read_trades_csv(tmp)
+        assert len(rows) == 2, "новых строк нет — обновляется существующая"
+>       assert rows[0]["entry_commission_rub"] == "2.00", (
+            "entry-комиссия уточнена в существующей строке")
+E       AssertionError: entry-комиссия уточнена в существующей строке
+E       assert '0.53' == '2.00'
+E         
+E         - 2.00
+E         + 0.53
+
+test_buy_accounting_audit.py:907: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-11-25 13:35:52,547 - INFO - [execution] OPEN WUSH qty=10 entry=100.0 sl=95.0 tp=110.0
+2026-11-25 13:35:52,547 - INFO - 🚀 [BUY] WUSH 10 лот. @ 100.0000 SL=95.0000 TP=110.0000 entry_comm=model (reason: unit)
+2026-11-25 13:35:52,548 - INFO - [notify] 🚀 <b>WUSH</b> BUY
+Исполнено: 10 лот. @ 100.0000
+SL: 95.0000
+TP: 110.0000
+<i>unit</i>
+2026-11-25 13:35:52,548 - INFO - [execution] OPEN X qty=5 entry=50.0 sl=95.0 tp=110.0
+2026-11-25 13:35:52,548 - INFO - 🚀 [BUY] X 5 лот. @ 50.0000 SL=95.0000 TP=110.0000 entry_comm=model (reason: unit)
+2026-11-25 13:35:52,549 - INFO - [notify] 🚀 <b>X</b> BUY
+Исполнено: 5 лот. @ 50.0000
+SL: 95.0000
+TP: 110.0000
+<i>unit</i>
+2026-11-25 13:35:52,549 - INFO - ✅ [CLOSED] WUSH None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+2026-11-25 13:35:52,549 - INFO - [notify] 🔒 <b>WUSH</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+2026-11-25 13:35:52,550 - INFO - ✅ [CLOSED] X None entry=50.0000 exit=55.0000 lots=5 gross=+25.00₽ net=+24.74₽ cum=+123.69₽
+2026-11-25 13:35:52,550 - INFO - [notify] 🔒 <b>X</b> закрыто по None
+Вход: 50.0000 → Выход: 55.0000
+Лотов: 5 (акций: 5)
+Net: <b>+24.74 ₽</b>
+2026-11-25 13:35:52,550 - WARNING - [register] WUSH: исполнение заявки buy-audit-oid-1 (10 лот.) уже применено к позиции (entry_applied_lots=10, state=CLOSED) — повторная регистрация не выполняется
+------------------------------ Captured log call -------------------------------
+INFO     root:execution.py:490 [execution] OPEN WUSH qty=10 entry=100.0 sl=95.0 tp=110.0
+INFO     root:main.py:3955 🚀 [BUY] WUSH 10 лот. @ 100.0000 SL=95.0000 TP=110.0000 entry_comm=model (reason: unit)
+INFO     root:main.py:900 [notify] 🚀 <b>WUSH</b> BUY
+Исполнено: 10 лот. @ 100.0000
+SL: 95.0000
+TP: 110.0000
+<i>unit</i>
+INFO     root:execution.py:490 [execution] OPEN X qty=5 entry=50.0 sl=95.0 tp=110.0
+INFO     root:main.py:3955 🚀 [BUY] X 5 лот. @ 50.0000 SL=95.0000 TP=110.0000 entry_comm=model (reason: unit)
+INFO     root:main.py:900 [notify] 🚀 <b>X</b> BUY
+Исполнено: 5 лот. @ 50.0000
+SL: 95.0000
+TP: 110.0000
+<i>unit</i>
+INFO     root:main.py:3095 ✅ [CLOSED] WUSH None entry=100.0000 exit=110.0000 lots=10 gross=+100.00₽ net=+98.95₽ cum=+98.95₽
+INFO     root:main.py:900 [notify] 🔒 <b>WUSH</b> закрыто по None
+Вход: 100.0000 → Выход: 110.0000
+Лотов: 10 (акций: 10)
+Net: <b>+98.95 ₽</b>
+INFO     root:main.py:3095 ✅ [CLOSED] X None entry=50.0000 exit=55.0000 lots=5 gross=+25.00₽ net=+24.74₽ cum=+123.69₽
+INFO     root:main.py:900 [notify] 🔒 <b>X</b> закрыто по None
+Вход: 50.0000 → Выход: 55.0000
+Лотов: 5 (акций: 5)
+Net: <b>+24.74 ₽</b>
+WARNING  root:main.py:3424 [register] WUSH: исполнение заявки buy-audit-oid-1 (10 лот.) уже применено к позиции (entry_applied_lots=10, state=CLOSED) — повторная регистрация не выполняется
+____________ test_ledger_identity_conflict_figi_change_fail_closed _____________
+
+env_audit = PosixPath('/tmp/pytest-of-z/pytest-25/test_ledger_identity_conflict_0')
+
+    def test_ledger_identity_conflict_figi_change_fail_closed(env_audit):
+        tmp = env_audit
+        ledger = make_ledger(tmp)
+        assert ledger.record_intent(OID, trade_id="t1", figi=FIGI, ticker=TICKER,
+                                    side="BUY", requested_lots=5) is True
+        # повторный отчёт той же заявки с ДРУГИМ FIGI
+        ok = ledger.record_status(OID, "FILL", figi=FIGI2, ticker=TICKER,
+                                  side="BUY", requested_lots=5, executed_lots=5,
+                                  source="audit")
+        rec = ledger.latest(OID)
+        assert rec is not None
+>       assert rec.get("figi") == FIGI, (
+            "подлинный FIGI заявки не перезаписан противоречивым отчётом")
+E       AssertionError: подлинный FIGI заявки не перезаписан противоречивым отчётом
+E       assert 'BBG00WUSHBUY2' == 'BBG00WUSHBUY1'
+E         
+E         - BBG00WUSHBUY1
+E         ?             ^
+E         + BBG00WUSHBUY2
+E         ?             ^
+
+test_buy_accounting_audit.py:995: AssertionError
+_________________ test_ledger_price_not_wiped_by_later_record __________________
+
+env_audit = PosixPath('/tmp/pytest-of-z/pytest-25/test_ledger_price_not_wiped_by0')
+
+    def test_ledger_price_not_wiped_by_later_record(env_audit):
+        tmp = env_audit
+        ledger = make_ledger(tmp)
+        ledger.record_sent(OID, trade_id="t1", figi=FIGI, ticker=TICKER, side="BUY",
+                           requested_lots=5, executed_lots=5, status_hint="FILL",
+                           avg_exec_price=123.45, source="post_response")
+        # поздний отчёт того же исполнения БЕЗ цены (статус/наблюдение)
+        ledger.record_status(OID, "FILL", executed_lots=5, requested_lots=5,
+                             source="poll")
+        rec = ledger.latest(OID)
+>       assert rec.get("avg_exec_price") == 123.45, (
+            "цена, подтверждённая ранее, не затирается отсутствием данных "
+            "в повторном отчёте")
+E       AssertionError: цена, подтверждённая ранее, не затирается отсутствием данных в повторном отчёте
+E       assert None == 123.45
+E        +  where None = <built-in method get of dict object at 0x7f0d3e288cc0>('avg_exec_price')
+E        +    where <built-in method get of dict object at 0x7f0d3e288cc0> = {'avg_exec_price': None, 'created_at_utc': '2026-11-25T13:35:52.591014+00:00', 'error': None, 'exchange_order_id': None, ...}.get
+
+test_buy_accounting_audit.py:1016: AssertionError
+=========================== short test summary info ============================
+FAILED test_buy_accounting_audit.py::test_tz08_late_commission_enriches_existing_entry
+FAILED test_buy_accounting_audit.py::test_tz09_zero_commission_distinguished_from_missing
+FAILED test_buy_accounting_audit.py::test_tz10_late_execution_price_enriches_recovery
+FAILED test_buy_accounting_audit.py::test_tz11_contradictory_repeat_fail_closed
+FAILED test_buy_accounting_audit.py::test_tz20_cumulative_recomputed_after_buy_metadata_update
+FAILED test_buy_accounting_audit.py::test_ledger_identity_conflict_figi_change_fail_closed
+FAILED test_buy_accounting_audit.py::test_ledger_price_not_wiped_by_later_record
+7 failed, 16 passed in 0.40s
