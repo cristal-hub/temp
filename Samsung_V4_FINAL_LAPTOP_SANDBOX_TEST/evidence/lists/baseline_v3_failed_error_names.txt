@@ -1,0 +1,2 @@
+# BASELINE V3: FAILED/ERROR поимённо (полный набор, root+tests/)
+# всего: 0

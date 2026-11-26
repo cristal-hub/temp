@@ -1,0 +1,1453 @@
+--- a/order_ledger.py
++++ b/order_ledger.py
+@@ -203,8 +203,46 @@
+         record = {"record_type": "ORDER_STATUS", "timestamp_utc": now, "status": str(status), "order_id": oid}
+         for key in ("trade_id", "figi", "ticker", "side", "requested_lots", "executed_lots", "lots_left", "avg_exec_price", "commission", "reason", "source", "error"):
+             value = fields.get(key)
++            # OOS-3 (документирование, V4): наследование prev-значений при
++            # value=None применяются ТОЛЬКО к identity-полям (trade_id, figi,
++            # ticker, side, requested_lots) и к идентификаторам ЭТАП 5Б ниже.
++            # ПОЛЯ ИСПОЛНЕНИЯ (executed_lots/lots_left) НАМЕРЕННО не
++            # наследуются: у repeat-отчёта без лотов поле остаётся
++            # ОТСУТСТВУЮЩИМ (None), а не «подтверждённым нулём» —
++            # отсутствие данных != ноль (та же семантика, что и у цены/
++            # комиссии). Финансовые значения дополнительно проходят
++            # валидацию V4 FIRST-RECORD-VALIDATION ниже.
+             if value is None and prev is not None and key in ("trade_id", "figi", "ticker", "side", "requested_lots"):
+                 value = prev.get(key)
++            # === V4 FIX FIRST-RECORD-VALIDATION (P1, ТЗ V4 §2) ===
++            # Валидация входящих финансовых значений выполняется ДО ветвления
++            # по наличию предыдущей записи и ЕДИНООБРАЗНО для всех входных
++            # путей реестра (append вызывается record_sent/record_status/
++            # record_uncertain/record_observation и путями восстановления):
++            # ПЕРВАЯ запись ордера больше не может сохранить недостоверное
++            # финансовое значение (ранее проверки жили только внутри
++            # `if prev is not None:`).
++            #   * avg_exec_price: достоверна только конечная ПОЛОЖИТЕЛЬНАЯ
++            #     цена; 0.0/отрицательная/NaN/±Inf -> отсутствие данных
++            #     (None). Семантика V3-2 НЕ изменена: 0.0-цена не является
++            #     «подтверждённой», позднее подтверждение обогащает запись;
++            #   * commission: достоверна любая конечная НЕОТРИЦАТЕЛЬНАЯ
++            #     величина; 0.0 остаётся ДОСТОВЕРНЫМ нулём (BUY V1 FIX-3);
++            #     отрицательная/NaN/±Inf -> None (отсутствие подтверждённой
++            #     комиссии). Легитимный 0.0 не превращается в пустое значение.
++            # Повторные записи: guard ниже (BUY AUDIT v1 FIX-1 + V3-2)
++            # работает как прежде по raw-значениям fields — достоверное
++            # прежнее значение не затирается, настоящее противоречие двух
++            # ДОСТОВЕРНЫХ значений на терминальной заявке по-прежнему
++            # fail-closed (защита НЕ ослаблена).
++            if key in ("avg_exec_price", "commission") and value is not None:
++                _valid = (_valid_execution_price if key == "avg_exec_price"
++                          else _valid_commission)
++                if not _valid(value):
++                    logging.error(
++                        "[ledger] order_id=%s: недостоверное значение %s=%r "
++                        "отклонено и записано как отсутствие данных.", oid, key, value)
++                    value = None
+             record[key] = value
+         # ЭТАП 5Б: идентификаторы переносятся из запроса; при отсутствии в
+         # запросе наследуются от предыдущей записи этой же заявки (как
+--- a/main.py
++++ b/main.py
+@@ -564,6 +564,7 @@
+ 
+ import config
+ import logger as research_logger
++import build_safety  # V4 LAPTOP SANDBOX TEST BUILD (ТЗ §7.3)
+ from order_ledger import OrderLedger, STATUS_FILL, STATUS_UNCERTAIN, utc_now_iso
+ from risk_manager import RiskManager
+ from strategy import StrategyManager
+@@ -571,6 +572,11 @@
+ from execution import (
+     ExecutionMonitor, PositionState, ACTIVE_STATES,
+     TrackedPosition,  # v2.3.7-stage1 (B2 V4): восстановление снимков recovery-задач
++    # V4 (OOS-4, ТЗ §10): единый источник истины о терминальных SELL-статусах.
++    # Дублирующее множество в main.py удалено — расхождение копий больше не
++    # может рассогласовать трактовку «терминальности» (замечание V3,
++    # OUT_OF_SCOPE_FINDINGS.md OOS-4). Имена и коды — без изменений.
++    _TERMINAL_SELL_STATUSES as _SELL_JOURNAL_TERMINAL_STATUSES,
+ )
+ from screener import Screener
+ 
+@@ -606,9 +612,10 @@
+ _TERMINAL_ORDER_STATUSES = {"FILL", "REJECTED", "CANCELLED", "EXPIRED"}
+ 
+ # ЭТАП 5Б (§4.2): терминальные статусы записей журнала close_orders —
+-# заявка с таким статусом НЕ блокирует новую SELL. Единый набор с
+-# execution._TERMINAL_SELL_STATUSES (имена + сырые числовые коды).
+-_SELL_JOURNAL_TERMINAL_STATUSES = {"FILL", "CANCELLED", "REJECTED", "EXPIRED", "1", "2", "3"}
++# заявка с таким статусом НЕ блокирует новую SELL. V4 (OOS-4): множество
++# определено ЕДИНОЖДЫ в execution.py (_TERMINAL_SELL_STATUSES, имена +
++# сырые числовые коды) и импортировано выше под историческим именем —
++# дублирующее объявление удалено, содержание не изменилось.
+ 
+ 
+ def _status_name(raw_status):
+@@ -5645,6 +5652,12 @@
+ 
+     async with TinkoffClient(config.TINKOFF_API_TOKEN, config.USE_SANDBOX) as client:
+         main_client = client
++        # V4 LAPTOP SANDBOX TEST BUILD (ТЗ §7.3): отправка/отмена заявок
++        # отключены по умолчанию (Режим A — SAFE START / READ-ONLY).
++        # Режим B включается ТОЛЬКО явной процедурой (маркер-файл + env,
++        # см. build_safety.detect_mode). LIVE запрещён всегда.
++        build_safety.assert_sandbox_only(config.USE_SANDBOX)
++        build_safety.install_order_guard(client)
+         rm = RiskManager(client)
+         rm_ref = rm
+         sm = StrategyManager()
+--- a/conftest.py
++++ b/conftest.py
+@@ -201,3 +201,27 @@
+     monkeypatch.setattr(main, "ledger_ref", None)
+     monkeypatch.setattr(main, "is_trading_enabled", _ORIG_IS_TRADING_ENABLED)
+     monkeypatch.setattr(main, "_save_state", _ORIG_SAVE_STATE)
++
++
++# ------------------------------------------------------------------
++# V4 (ТЗ §5): изоляция runtime-файлов.
++# OOS-1 (V3): несколько тестов (ветки trading_cycle и др.) не задают
++# собственные пути и создавали state.json / research_events.jsonl /
++# research_trades.csv / order_ledger.jsonl / trading.flag в КОРНЕ
++# кандидата. Фикстура перенаправляет ДЕФОЛТНЫЕ production-пути в
++# per-test tmp-каталог ДО тела теста. Тест, задающий свой путь через
++# monkeypatch/прямое присваивание, перекрывает эти значения как прежде
++# (его подмена накладывается поверх сброса; teardown восстанавливает).
++# Production-код не меняется; сценарии и ожидания тестов не меняются.
++# ------------------------------------------------------------------
++
++@pytest.fixture(autouse=True)
++def _isolate_default_runtime_paths(tmp_path, monkeypatch):
++    import logger as _logger
++    monkeypatch.setattr(main, "STATE_FILE", str(tmp_path / "state.json"))
++    monkeypatch.setattr(main, "STATE_FILE_TMP", str(tmp_path / "state.json.tmp"))
++    monkeypatch.setattr(main, "LEDGER_FILE", str(tmp_path / "order_ledger.jsonl"))
++    monkeypatch.setattr(main, "TRADING_FLAG", str(tmp_path / "trading.flag"))
++    monkeypatch.setattr(_logger, "EVENTS_FILE", str(tmp_path / "research_events.jsonl"))
++    monkeypatch.setattr(_logger, "TRADES_FILE", str(tmp_path / "research_trades.csv"))
++    yield
+--- /dev/null
++++ b/build_safety.py
+@@ -0,0 +1,123 @@
++# build_safety.py
++# LAPTOP SANDBOX TEST BUILD — BROKER ORDER SUBMISSION DISABLED BY DEFAULT
++#
++# Безопасное ядро тестовой сборки V4 (ТЗ V4 §7.3): техническое разделение
++# режимов БЕЗ изменения торговой логики, сигналов, фильтров и рисков.
++#
++#   Режим A — SAFE START / READ-ONLY (ПО УМОЛЧАНИЮ):
++#       отправка заявок (post_market_order) и отмена заявок (cancel_order)
++#       технически ЗАБЛОКИРОВАНЫ на уровне экземпляра клиента:
++#       install_order_guard(client) подменяет эти методы защитными, которые
++#       поднимают OrderSubmissionDisabledError ДО любого обращения к сети.
++#       Ни BUY, ни SELL, ни отмена не могут достигнуть брокера.
++#
++#   Режим B — CONTROLLED SANDBOX EXECUTION (по умолчанию ВЫКЛЮЧЕН):
++#       включается ТОЛЬКО одновременным выполнением ДВУХ явных условий:
++#         1) файл-маркер sandbox_execution.enabled в корне сборки
++#            (создаётся скриптом enable_sandbox_execution.py после
++#            интерактивного подтверждения оператором);
++#         2) переменная окружения SAMSUNG_V4_BUILD_MODE=SANDBOX_EXECUTION
++#            в запускаемом процессе.
++#       Отсутствие ЛЮБОГО из двух условий -> заявки заблокированы.
++#       Случайное значение конфигурации режим не включает.
++#
++#   LIVE запрещён ВСЕГДА (три независимых уровня):
++#         1) TinkoffClient.__init__ поднимает SandboxRequiredError при
++#            use_sandbox=False;
++#         2) config.validate() поднимает RuntimeError при USE_SANDBOX=False;
++#         3) assert_sandbox_only() — явная проверка сборки.
++#       Никаких автоматических переключений Sandbox<->LIVE нет.
++#
++# Неизвестное/невалидное значение SAMSUNG_V4_BUILD_MODE безопасно
++# трактуется как SAFE_START (fail-closed): опечатка не может включить заявки.
++
++import os
++
++MODE_SAFE_START = "SAFE_START"
++MODE_SANDBOX_EXECUTION = "SANDBOX_EXECUTION"
++MODE_ENV_VAR = "SAMSUNG_V4_BUILD_MODE"
++MARKER_FILE = "sandbox_execution.enabled"
++
++GUARDED_METHODS = ("post_market_order", "cancel_order")
++
++
++class OrderSubmissionDisabledError(RuntimeError):
++    """Поднимается вместо отправки/отмены заявки в режиме SAFE_START."""
++
++
++def marker_present(root: str = ".") -> bool:
++    return os.path.isfile(os.path.join(root, MARKER_FILE))
++
++
++def detect_mode(root: str = ".") -> str:
++    """Единственный источник истины о режиме сборки (fail-closed).
++
++    SANDBOX_EXECUTION возможен ТОЛЬКО при env=SANDBOX_EXECUTION И наличии
++    маркер-файла. Любое другое сочетание (в т.ч. неизвестное значение env,
++    отсутствие env при наличии маркера) -> SAFE_START.
++    """
++    raw = (os.getenv(MODE_ENV_VAR) or "").strip().upper()
++    if raw == MODE_SANDBOX_EXECUTION and marker_present(root):
++        return MODE_SANDBOX_EXECUTION
++    return MODE_SAFE_START
++
++
++def mode_is_known(root: str = ".") -> bool:
++    """True, если значение env (если задано) распознано — для диагностики."""
++    raw = (os.getenv(MODE_ENV_VAR) or "").strip().upper()
++    return raw in ("", MODE_SAFE_START, MODE_SANDBOX_EXECUTION)
++
++
++def orders_allowed(mode: str = None) -> bool:
++    """Заявки разрешены только в Режиме B (см. detect_mode)."""
++    if mode is None:
++        mode = detect_mode()
++    return mode == MODE_SANDBOX_EXECUTION
++
++
++def assert_sandbox_only(use_sandbox) -> None:
++    """Третий независимый уровень блокировки LIVE (для диагностики сборки)."""
++    if not use_sandbox:
++        raise RuntimeError(
++            "LAPTOP SANDBOX TEST BUILD: LIVE запрещён. USE_SANDBOX=False "
++            "недопустим в тестовой сборке (sandbox-only).")
++
++
++def install_order_guard(client, mode: str = None) -> bool:
++    """Отключает отправку/отмену заявок на ЭКЗЕМПЛЯРЕ клиента (Режим A).
++
++    Возвращает True, если установлен защитный барьер (заявки заблокированы);
++    False — если режим B активен (production-поведение unchanged) или guard
++    уже установлен (идемпотентно). Экземплярные атрибуты перекрывают методы
++    класса, поэтому защитой охватываются ВСЕ вызывающие пути main.py
++    (register_executed_buy, close_position, poll_open_orders и др.).
++    """
++    if getattr(client, "_v4_order_guard_installed", False):
++        return False
++    if mode is None:
++        mode = detect_mode()
++    client._v4_order_guard_installed = True
++    client._v4_order_guard_mode = mode
++    if orders_allowed(mode):
++        return False
++
++    def _blocked(*args, **kwargs):
++        raise OrderSubmissionDisabledError(
++            "LAPTOP SANDBOX TEST BUILD: операция с заявками отклонена "
++            f"(активный режим: {mode}, отправка заявок отключена по "
++            "умолчанию). Включение Режима B — только по процедуре "
++            "LAPTOP_TEST_RUNBOOK_RU.md (§ Режим B).")
++
++    for name in GUARDED_METHODS:
++        setattr(client, name, _blocked)
++    return True
++
++
++def guard_report(client) -> dict:
++    """Диагностика состояния guard'а (без секретов)."""
++    return {
++        "guard_installed": bool(getattr(client, "_v4_order_guard_installed", False)),
++        "mode": getattr(client, "_v4_order_guard_mode", detect_mode()),
++        "orders_allowed": orders_allowed(getattr(client, "_v4_order_guard_mode", None)),
++        "guarded_methods": list(GUARDED_METHODS),
++    }
+--- /dev/null
++++ b/safe_start.py
+@@ -0,0 +1,274 @@
++# safe_start.py
++# SAFE START / READ-ONLY — Режим A тестовой сборки V4 (ТЗ V4 §7.3).
++# ЗАПУСК ПО УМОЛЧАНИЮ. Это НЕ main.py: торговый цикл не запускается.
++#
++# Что ДЕЛАЕТ (разрешено в Режиме A):
++#   * проверяет зависимости и конфигурацию (fail-closed: отсутствующие
++#     ключи/некорректные параметры -> понятный отказ, exit-код 2);
++#   * проверяет активный режим сборки и ЗАЩИТУ ОТ ОТПРАВКИ ЗАЯВОК
++#     (включая само-тест: попытка отправить заявку ОБЯЗАНА отклониться);
++#   * проверяет доступность sandbox API только READ-ONLY запросами
++#     (список аккаунтов, позиции); аккаунт НЕ создаётся (в отличие от
++#     main.py, который создаёт его при первом запуске Режима B);
++#   * проверяет локальные данные: реестр заявок (order_ledger.jsonl) и
++#     локальное состояние (state.json);
++#   * печатает диагностику (ТЗ §7.5) без токенов/секретов и корректно
++#     завершается (штатная остановка).
++#
++# Что НЕ делает (запрещено в Режиме A):
++#   * НЕ запускает trading_cycle / скринер / reconcile / telegram-бота;
++#   * НЕ отправляет и НЕ отменяет заявки (BUY/SELL/отмена);
++#   * НЕ изменяет баланс, позиции, аккаунты брокера;
++#   * НЕ включает Режим B (см. enable_sandbox_execution.py и RUNBOOK).
++#
++# Использование:
++#   python safe_start.py            # полная проверка (включая read-only API)
++#   python safe_start.py --no-api   # без обращения к сети (только локально)
++#
++# Все сообщения — на русском; секреты не печатаются (только факт
++# наличия настройки).
++
++import asyncio
++import importlib
++import json
++import os
++import platform
++import sys
++
++import config
++import build_safety
++from order_ledger import OrderLedger
++
++LEDGER_FILE = "order_ledger.jsonl"
++STATE_FILE = "state.json"
++
++SECRET_ENV_VARS = (
++    "TINKOFF_API_TOKEN", "TINKOFF_READONLY_TOKEN", "TELEGRAM_BOT_TOKEN",
++    "TELEGRAM_CHAT_ID", "TELEGRAM_ALLOWED_USER_ID", "TINKOFF_ACCOUNT_ID",
++    "STARTING_BALANCE",
++)
++
++_OK, _WARN, _FAIL, _SKIP = "OK", "ВНИМАНИЕ", "ОТКАЗ", "ПРОПУЩЕНО"
++_results = []  # (статус, компонент, деталь)
++
++
++def _add(status, component, detail=""):
++    _results.append((status, component, detail))
++    mark = {_OK: "[ OK ]", _WARN: "[!! ]", _FAIL: "[FAIL]", _SKIP: "[SKIP]"}[status]
++    print(f"  {mark} {component}: {detail}" if detail else f"  {mark} {component}")
++
++
++def _check_dependencies():
++    print("\n== 1. Зависимости ==")
++    required = {"pandas": "обязательная", "dotenv": "обязательная",
++                "pandas_ta_classic": "обязательная"}
++    optional = {"telegram": "уведомления (робот работает и без неё)",
++                "t_tech": "SDK брокера"}
++    ok = True
++    for mod, role in required.items():
++        try:
++            importlib.import_module(mod)
++            _add(_OK, mod, f"{role} — найдена")
++        except Exception as exc:
++            ok = False
++            _add(_FAIL, mod, f"{role} — ОТСУТСТВУЕТ ({type(exc).__name__})")
++    for mod, role in optional.items():
++        try:
++            importlib.import_module(mod)
++            _add(_OK, mod, f"{role} — найдена")
++        except Exception:
++            if mod == "t_tech":
++                _add(_WARN, mod, f"{role} — нет (заглушки conftest только для тестов; "
++                                 "для работы с брокером требуется requirements.txt)")
++            else:
++                _add(_WARN, mod, f"{role} — нет (робот работает без уведомлений)")
++    return ok
++
++
++def _check_configuration():
++    print("\n== 2. Конфигурация ==")
++    src = ".env (текущий каталог)" if os.path.isfile(".env") else \
++        "переменные окружения процесса (.env в каталоге сборки не найден)"
++    print(f"  источник конфигурации: {src}")
++    for var in SECRET_ENV_VARS:
++        state = "задана" if os.getenv(var) else "НЕ задана"
++        print(f"    {var}: {state} (значение не выводится)")
++    try:
++        config.validate()
++        _add(_OK, "config.validate()", "конфигурация валидна; sandbox-only подтверждён")
++        return True
++    except Exception as exc:
++        _add(_FAIL, "config.validate()", f"безопасный отказ: {exc}")
++        return False
++
++
++def _check_mode_and_guard():
++    print("\n== 3. Режим сборки и защита заявок ==")
++    mode = build_safety.detect_mode()
++    known = build_safety.mode_is_known()
++    raw_env = (os.getenv(build_safety.MODE_ENV_VAR) or "").strip()
++    if raw_env and not known:
++        _add(_WARN, "SAMSUNG_V4_BUILD_MODE",
++             f"неизвестное значение {raw_env!r} -> безопасно трактуется как {mode}")
++    else:
++        _add(_OK, "SAMSUNG_V4_BUILD_MODE", raw_env or "(не задана)")
++    _add(_OK, "маркер Режима B", "присутствует" if build_safety.marker_present()
++         else "отсутствует (Режим B выключен)")
++    _add(_OK, "активный режим", mode)
++
++    try:
++        build_safety.assert_sandbox_only(config.USE_SANDBOX)
++        _add(_OK, "sandbox-only", "USE_SANDBOX=True; LIVE запрещён")
++    except Exception as exc:
++        _add(_FAIL, "sandbox-only", str(exc))
++        return None, False
++
++    # Клиент + guard + само-тест блокировки
++    from tinkoff_client import TinkoffClient
++    from build_safety import OrderSubmissionDisabledError
++    client = TinkoffClient(config.TINKOFF_API_TOKEN, config.USE_SANDBOX)
++    guarded = build_safety.install_order_guard(client, mode)
++    rep = build_safety.guard_report(client)
++    if mode == build_safety.MODE_SANDBOX_EXECUTION:
++        _add(_WARN, "Режим B активен",
++             "заявки разрешены только в sandbox; убедитесь, что это осознанный запуск")
++        return client, True
++    _add(_OK, "guard заявок", f"установлен={guarded}; методы: {rep['guarded_methods']}")
++
++    # Само-тест: попытка отправить заявку ОБЯЗАНА отклониться ДО сети
++    # (guard подменяет метод обычной функцией — исключение возникает
++    # синхронно, до создания coroutine и обращения к сети)
++    try:
++        client.post_market_order("SELFTEST_FIGI", 1, None, "safe-start-selftest")
++        _add(_FAIL, "само-тест блокировки", "заявка НЕ отклонена — защита сломана!")
++        return client, False
++    except OrderSubmissionDisabledError as exc:
++        _add(_OK, "само-тест блокировки", f"заявка отклонена: {str(exc)[:80]}...")
++        return client, True
++    except Exception as exc:
++        _add(_FAIL, "само-тест блокировки", f"неожиданное исключение {type(exc).__name__}: {exc}")
++        return client, False
++
++
++async def _api_readonly_probe():
++    """Только READ-ONLY: аккаунты и позиции. Аккаунт не создаётся."""
++    from t_tech.invest.sandbox.async_client import AsyncSandboxClient
++    print("\n== 4. Sandbox API (только чтение) ==")
++    sbx = AsyncSandboxClient(config.TINKOFF_API_TOKEN)
++    raw = None
++    try:
++        raw = await asyncio.wait_for(sbx.__aenter__(), timeout=30)
++        _add(_OK, "подключение", "SANDBOX API доступен")
++        accounts = await asyncio.wait_for(raw.users.get_accounts(), timeout=30)
++        n = len(getattr(accounts, "accounts", []) or [])
++        _add(_OK, "аккаунты", f"найдено: {n} (id не выводятся)")
++        if n:
++            acc_id = accounts.accounts[0].id
++            positions = await asyncio.wait_for(
++                raw.operations.get_positions(account_id=acc_id), timeout=30)
++            securities = list(getattr(positions, "securities", []) or [])
++            print(f"    позиций (securities) на первом аккаунте: {len(securities)} "
++                  "(только чтение)")
++        else:
++            print("    sandbox-аккаунт отсутствует — SAFE START его НЕ создаёт; "
++                  "аккаунт будет создан при первом штатном запуске (Режим B).")
++        return True
++    except Exception as exc:
++        _add(_FAIL, "sandbox API", f"недоступен: {type(exc).__name__}: {exc}")
++        return False
++    finally:
++        if raw is not None:
++            try:
++                await sbx.__aexit__(None, None, None)
++            except Exception:
++                pass
++
++
++def _check_local_data():
++    print("\n== 5. Локальные данные ==")
++    # Реестр заявок
++    try:
++        ledger = OrderLedger(LEDGER_FILE)
++        ledger.load()
++        if ledger.is_reliable():
++            latest = ledger.latest_all()
++            open_n = len(ledger.open_orders())
++            unc_n = sum(1 for r in latest.values() if r.get("status") == "UNCERTAIN")
++            _add(_OK, "order_ledger.jsonl",
++                 f"достоверен; записей: {len(latest)}, открытых заявок: {open_n}, UNCERTAIN: {unc_n}")
++        else:
++            _add(_WARN, "order_ledger.jsonl",
++                 f"НЕДОСТОВЕРЕН: {ledger.unreliable_reason} (новые BUY будут заблокированы)")
++    except Exception as exc:
++        _add(_WARN, "order_ledger.jsonl", f"не прочитан: {type(exc).__name__}: {exc}")
++    # Локальное состояние
++    if not os.path.isfile(STATE_FILE):
++        _add(_OK, "state.json", "отсутствует (чистый старт; при первом цикле будет создан)")
++        return
++    try:
++        with open(STATE_FILE, "r", encoding="utf-8") as f:
++            data = json.load(f)
++        if not isinstance(data, dict):
++            _add(_FAIL, "state.json", "корневой объект не dict")
++            return
++        positions = data.get("positions", {})
++        pos_n = len(positions) if isinstance(positions, dict) else "?"
++        mon_err = bool(data.get("monitoring_error", False))
++        rec_n = len(data.get("pending_csv_recoveries", []) or [])
++        _add(_OK, "state.json",
++             f"валидный JSON; позиций: {pos_n}; monitoring_error={mon_err}; "
++             f"CSV-recovery задач: {rec_n}")
++    except Exception as exc:
++        _add(_FAIL, "state.json", f"повреждён: {type(exc).__name__}: {exc} "
++                                  "(новые входы будут заблокированы до разбора)")
++
++
++def main() -> int:
++    _results.clear()  # каждый запуск диагностики начинается с чистого списка
++    print("=" * 64)
++    print("LAPTOP SANDBOX TEST BUILD — SAFE START / READ-ONLY (Режим A)")
++    print("STRATEGY LOGIC: UNCHANGED | RESEARCH ONLY | NO LIVE ORDERS")
++    print("BROKER ORDER SUBMISSION DISABLED BY DEFAULT")
++    print("=" * 64)
++    print(f"python: {platform.python_version()} | platform: {platform.system()}")
++    print(f"сборка: {getattr(config, 'BUILD_VERSION', '?')} + V4 laptop-sandbox")
++    print(f"каталог: {os.getcwd()}")
++    no_api = "--no-api" in sys.argv
++
++    overall = True
++    overall &= _check_dependencies()
++    overall &= _check_configuration()
++    client, guard_ok = _check_mode_and_guard()
++    overall &= guard_ok and client is not None
++    if overall and not no_api:
++        overall &= asyncio.run(_api_readonly_probe())
++    elif no_api:
++        print("\n== 4. Sandbox API (только чтение) ==")
++        _add(_SKIP, "sandbox API", "--no-api: сетевые проверки отключены пользователем")
++    _check_local_data()
++
++    print("\n== Итог ==")
++    failed = [r for r in _results if r[0] == _FAIL]
++    warned = [r for r in _results if r[0] == _WARN]
++    if failed:
++        print(f"  БЕЗОПАСНЫЙ ОТКАЗ: {len(failed)} проверок завершились ошибкой:")
++        for _, comp, det in failed:
++            print(f"    - {comp}: {det}")
++        print("  Запросы НЕ отправлялись; торговый цикл не запускался.")
++        print("  Устраните причину (см. INSTALLATION_RU.md) и повторите safe_start.")
++        return 2
++    print("  SAFE START завершён: конфигурация, защита заявок и локальные "
++          "данные проверены; заявки отключены; торговый цикл не запускался.")
++    if warned:
++        print(f"  предупреждений: {len(warned)} (см. пометки [!! ] выше)")
++    print("  Следующие шаги — LAPTOP_TEST_RUNBOOK_RU.md (§7 и далее).")
++    return 0
++
++
++if __name__ == "__main__":
++    try:
++        sys.exit(main())
++    except KeyboardInterrupt:
++        print("\nШтатная остановка (Ctrl+C): проверки прерваны пользователем; "
++              "заявки не отправлялись.")
++        sys.exit(130)
+--- /dev/null
++++ b/enable_sandbox_execution.py
+@@ -0,0 +1,70 @@
++# enable_sandbox_execution.py
++# Режим B — CONTROLLED SANDBOX EXECUTION: инструмент ЯВНОГО включения
++# (ТЗ V4 §7.3). По умолчанию Режим B ВЫКЛЮЧЕН; этот скрипт создаёт
++# файл-маркер sandbox_execution.enabled ПОСЛЕ интерактивного подтверждения.
++#
++# ВАЖНО:
++#   * LIVE остаётся запрещённым ВСЕГДА (TinkoffClient и config.validate()
++#     отклоняют use_sandbox=False при любых обстоятельствах);
++#   * маркер сам по себе заявки не включает: для активного Режима B нужно
++#     ОДНОВРЕМЕННО (a) наличие маркера и (b) запуск процесса с переменной
++#     окружения SAMSUNG_V4_BUILD_MODE=SANDBOX_EXECUTION;
++#   * случайное значение конфигурации или опечатка не включают заявки
++#     (build_safety.detect_mode трактует всё неизвестное как SAFE_START).
++#
++# Запуск GLM НЕ выполнял и выполнять не вправе (ТЗ §7.3): инструмент
++# подготовлен и задокументирован, но оставлен неактивированным.
++#
++# Использование (см. LAPTOP_TEST_RUNBOOK_RU.md, раздел «Режим B»):
++#   python enable_sandbox_execution.py
++
++import datetime
++import os
++import sys
++
++MARKER_FILE = "sandbox_execution.enabled"
++CONFIRM_PHRASE = "ENABLE-SANDBOX"
++
++
++def main() -> int:
++    print("=" * 64)
++    print("ВКЛЮЧЕНИЕ РЕЖИМА B — CONTROLLED SANDBOX EXECUTION")
++    print("=" * 64)
++    print("Этот шаг разрешает отправку SANDBOX-заявок при запуске main.py с")
++    print("переменной окружения SAMSUNG_V4_BUILD_MODE=SANDBOX_EXECUTION.")
++    print("LIVE-режим останется технически запрещённым при любых условиях.")
++    print()
++    if os.path.isfile(MARKER_FILE):
++        print(f"Маркер {MARKER_FILE} уже существует — повторное включение не требуется.")
++        return 0
++    try:
++        answer = input(f"Для включения введите точно {CONFIRM_PHRASE} и нажмите Enter: ").strip()
++    except KeyboardInterrupt:
++        print("\nОтменено пользователем. Маркер НЕ создан.")
++        return 130
++    if answer != CONFIRM_PHRASE:
++        print("Фраза не совпала — включение ОТМЕНЕНО. Маркер НЕ создан.")
++        return 1
++    stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
++    with open(MARKER_FILE, "w", encoding="utf-8") as f:
++        f.write(f"enabled_at_utc={stamp}\n"
++                "mode=SANDBOX_EXECUTION\n"
++                "live=FORBIDDEN\n"
++                "note=Created manually by operator (enable_sandbox_execution.py)\n")
++    print()
++    print(f"Маркер создан: {os.path.abspath(MARKER_FILE)}")
++    print()
++    print("Чтобы запустить Режим B, выполняйте main.py В ЭТОМ каталоге с переменной окружения,")
++    print("например в PowerShell:")
++    print('  $env:SAMSUNG_V4_BUILD_MODE = "SANDBOX_EXECUTION"')
++    print("  python main.py")
++    print()
++    print("Без этой переменной окружения (или после закрытия терминала) заявки")
++    print("снова заблокированы — Режим B не сохраняется между сессиями.")
++    print("Чтобы вернуть сборку в Режим A: удалите файл-маркер:")
++    print(f"  Remove-Item {MARKER_FILE}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+--- /dev/null
++++ b/test_v4_order_ledger_first_append.py
+@@ -0,0 +1,415 @@
++# test_v4_order_ledger_first_append.py
++# V4 (ТЗ §2): P1 — валидация финансовых значений при ПЕРВОЙ записи реестра.
++#
++# Дефект V3: проверки _valid_execution_price/_valid_commission выполнялись
++# только внутри ветки `if prev is not None:` в OrderLedger.append(). Первая
++# запись ордера (prev is None) обходила их: avg_exec_price=0.0/отрицательная/
++# NaN/±Inf и отрицательная/NaN/±Inf комиссия попадали в журнал как
++# «подтверждённые».
++#
++# Исправление V4: валидация выполняется ДО ветвления по prev и действует
++# единообразно для всех входных путей (record_sent/record_status/
++# record_uncertain/record_observation + повторная загрузка/восстановление).
++#
++# Каждый тест проверяет не только возвращаемое значение, но и ФАКТИЧЕСКОЕ
++# содержимое сохранённого журнала (JSONL) и/или состояние после load().
++# Все runtime-файлы — только в tmp_path (изоляция, ТЗ §5).
++
++import json
++import math
++import os
++
++import pytest
++
++from order_ledger import OrderLedger
++
++
++def _read_status_records(path):
++    """Все ORDER_STATUS-записи сохранённого журнала (в порядке записи)."""
++    with open(path, "r", encoding="utf-8") as f:
++        return [json.loads(line) for line in f if line.strip()
++                and json.loads(line).get("record_type") == "ORDER_STATUS"]
++
++
++def _first_record(path):
++    recs = _read_status_records(path)
++    assert recs, "журнал пуст: первая запись не сохранена"
++    return recs[0]
++
++
++def _last_record(path):
++    recs = _read_status_records(path)
++    assert recs, "журнал пуст"
++    return recs[-1]
++
++
++def _mk(tmp_path):
++    return OrderLedger(str(tmp_path / "order_ledger.jsonl"))
++
++
++def _first_append(ledger, **overrides):
++    """Первая запись ордера штатным production-путём record_status()."""
++    params = dict(
++        trade_id="t-1", figi="BBG000000000", ticker="TEST", side="BUY",
++        requested_lots=5, executed_lots=2,
++        avg_exec_price=None, commission=None, source="test",
++    )
++    params.update(overrides)
++    oid = "order-first-1"
++    return oid, ledger.record_status(oid, params.pop("status", "PARTIALLYFILL"), **params)
++
++
++# ---------------------------------------------------------------------
++# 1-5. Цена исполнения: невалидные значения при первой записи
++# ---------------------------------------------------------------------
++
++def test_first_append_zero_price_not_recorded_as_confirmed(tmp_path):
++    """(1) avg_exec_price=0.0 при первой записи: 0.0 не «подтверждённая цена»."""
++    ledger = _mk(tmp_path)
++    path = ledger.path
++    oid, ok = _first_append(ledger, avg_exec_price=0.0)
++    assert ok is True
++    rec = ledger.latest(oid)
++    assert rec["avg_exec_price"] is None
++    saved = _first_record(path)
++    assert saved["avg_exec_price"] is None
++
++
++def test_first_append_negative_price_rejected(tmp_path):
++    """(2) отрицательная цена при первой записи не записывается."""
++    ledger = _mk(tmp_path)
++    oid, ok = _first_append(ledger, avg_exec_price=-100.0)
++    assert ok is True
++    assert ledger.latest(oid)["avg_exec_price"] is None
++    assert _first_record(ledger.path)["avg_exec_price"] is None
++
++
++def test_first_append_nan_price_rejected(tmp_path):
++    """(3) NaN-цена при первой записи не записывается."""
++    ledger = _mk(tmp_path)
++    oid, ok = _first_append(ledger, avg_exec_price=float("nan"))
++    assert ok is True
++    assert ledger.latest(oid)["avg_exec_price"] is None
++    saved = _first_record(ledger.path)
++    assert saved["avg_exec_price"] is None
++    # NaN не должен присутствовать в журнале даже как литерал NaN
++    raw = open(ledger.path, "r", encoding="utf-8").read()
++    assert "NaN" not in raw
++
++
++def test_first_append_plus_inf_price_rejected(tmp_path):
++    """(4) +Infinity-цена при первой записи не записывается."""
++    ledger = _mk(tmp_path)
++    oid, ok = _first_append(ledger, avg_exec_price=float("inf"))
++    assert ok is True
++    assert ledger.latest(oid)["avg_exec_price"] is None
++    assert _first_record(ledger.path)["avg_exec_price"] is None
++
++
++def test_first_append_minus_inf_price_rejected(tmp_path):
++    """(5) -Infinity-цена при первой записи не записывается."""
++    ledger = _mk(tmp_path)
++    oid, ok = _first_append(ledger, avg_exec_price=float("-inf"))
++    assert ok is True
++    assert ledger.latest(oid)["avg_exec_price"] is None
++    assert _first_record(ledger.path)["avg_exec_price"] is None
++
++
++# ---------------------------------------------------------------------
++# 6-8. Комиссия: невалидные значения при первой записи
++# ---------------------------------------------------------------------
++
++def test_first_append_negative_commission_rejected(tmp_path):
++    """(6) отрицательная комиссия при первой записи не записывается."""
++    ledger = _mk(tmp_path)
++    oid, ok = _first_append(ledger, commission=-0.01)
++    assert ok is True
++    assert ledger.latest(oid)["commission"] is None
++    assert _first_record(ledger.path)["commission"] is None
++
++
++def test_first_append_nan_commission_rejected(tmp_path):
++    """(7) NaN-комиссия при первой записи не записывается."""
++    ledger = _mk(tmp_path)
++    oid, ok = _first_append(ledger, commission=float("nan"))
++    assert ok is True
++    assert ledger.latest(oid)["commission"] is None
++    raw = open(ledger.path, "r", encoding="utf-8").read()
++    assert "NaN" not in raw
++
++
++def test_first_append_inf_commission_rejected(tmp_path):
++    """(8) бесконечная комиссия (+Inf и -Inf) при первой записи не записывается."""
++    ledger = _mk(tmp_path)
++    oid1, ok1 = _first_append(ledger, commission=float("inf"))
++    oid2 = "order-first-2"
++    ok2 = ledger.record_status(oid2, "PARTIALLYFILL", trade_id="t-2",
++                               figi="BBG000000000", ticker="TEST", side="BUY",
++                               requested_lots=5, executed_lots=2,
++                               commission=float("-inf"), source="test")
++    assert ok1 is True and ok2 is True
++    assert ledger.latest(oid1)["commission"] is None
++    assert ledger.latest(oid2)["commission"] is None
++    raw = open(ledger.path, "r", encoding="utf-8").read()
++    assert "Infinity" not in raw
++
++
++# ---------------------------------------------------------------------
++# 9-11. Валидные значения при первой записи сохраняются как есть
++# ---------------------------------------------------------------------
++
++def test_first_append_zero_commission_is_valid_and_persisted(tmp_path):
++    """(9) commission=0.0 при первой записи — ДОСТОВЕРНЫЙ ноль, не пустота."""
++    ledger = _mk(tmp_path)
++    oid, ok = _first_append(ledger, commission=0.0)
++    assert ok is True
++    rec = ledger.latest(oid)
++    assert rec["commission"] == 0.0
++    saved = _first_record(ledger.path)
++    assert saved["commission"] == 0.0
++    # 0.0 не превращается в отсутствие значения
++    assert saved["commission"] is not None
++
++
++def test_first_append_price_none_is_legitimate_absence(tmp_path):
++    """(10) avg_exec_price=None при первой записи — легитимное отсутствие."""
++    ledger = _mk(tmp_path)
++    oid, ok = _first_append(ledger, avg_exec_price=None)
++    assert ok is True
++    rec = ledger.latest(oid)
++    assert rec["avg_exec_price"] is None
++    assert rec["status"] == "PARTIALLYFILL"
++    assert rec["executed_lots"] == 2
++    assert _first_record(ledger.path)["avg_exec_price"] is None
++
++
++def test_first_append_valid_price_and_commission_persisted(tmp_path):
++    """(11) корректные положительные цена и комиссия сохраняются."""
++    ledger = _mk(tmp_path)
++    oid, ok = _first_append(ledger, avg_exec_price=100.0, commission=0.5)
++    assert ok is True
++    rec = ledger.latest(oid)
++    assert rec["avg_exec_price"] == 100.0
++    assert rec["commission"] == 0.5
++    saved = _first_record(ledger.path)
++    assert saved["avg_exec_price"] == 100.0
++    assert saved["commission"] == 0.5
++
++
++# ---------------------------------------------------------------------
++# 12. Повторное обновление записи: валидация и guard не ослаблены
++# ---------------------------------------------------------------------
++
++def test_repeat_update_validation_preserved(tmp_path):
++    """(12) повторная запись: NaN/0.0-цена не затирает подтверждённую;
++    кумулятивное уточнение на нетерминальной заявке легитимно."""
++    ledger = _mk(tmp_path)
++    oid = "order-repeat-1"
++    # первая запись: достоверная цена
++    ok1 = ledger.record_status(oid, "PARTIALLYFILL", trade_id="t-1",
++                               figi="BBG000000000", ticker="TEST", side="BUY",
++                               requested_lots=5, executed_lots=2,
++                               avg_exec_price=100.0, commission=0.0, source="test")
++    assert ok1 is True
++    # повторный отчёт с NaN-ценой: подтверждённая цена сохраняется
++    ok2 = ledger.record_status(oid, "PARTIALLYFILL", trade_id="t-1",
++                               figi="BBG000000000", ticker="TEST", side="BUY",
++                               requested_lots=5, executed_lots=2,
++                               avg_exec_price=float("nan"), source="test")
++    assert ok2 is True
++    rec = ledger.latest(oid)
++    assert rec["status"] != "UNCERTAIN"
++    assert rec["avg_exec_price"] == 100.0
++    # повторный 0.0-«отчёт» (CANCELLED-остаток) не затирает подтверждённую
++    ok3 = ledger.record_status(oid, "PARTIALLYFILL", trade_id="t-1",
++                               figi="BBG000000000", ticker="TEST", side="BUY",
++                               requested_lots=5, executed_lots=2,
++                               avg_exec_price=0.0, source="test")
++    assert ok3 is True
++    assert ledger.latest(oid)["avg_exec_price"] == 100.0
++    # нетерминальное кумулятивное уточнение принимается
++    ok4 = ledger.record_status(oid, "PARTIALLYFILL", trade_id="t-1",
++                               figi="BBG000000000", ticker="TEST", side="BUY",
++                               requested_lots=5, executed_lots=4,
++                               avg_exec_price=101.5, source="test")
++    assert ok4 is True
++    rec4 = ledger.latest(oid)
++    assert rec4["status"] != "UNCERTAIN"
++    assert rec4["avg_exec_price"] == 101.5
++    # NaN так и не попал в журнал
++    raw = open(ledger.path, "r", encoding="utf-8").read()
++    assert "NaN" not in raw
++
++
++# ---------------------------------------------------------------------
++# 13. Обогащение неизвестной цены поздним подтверждением (P0-сценарий)
++# ---------------------------------------------------------------------
++
++def test_late_confirmation_enriches_unknown_price(tmp_path):
++    """(13) неизвестная цена (включая репорт 0.0) обогащается поздним
++    подтверждением без ложного UNCERTAIN — контракт ТЗ §3.3."""
++    ledger = _mk(tmp_path)
++    oid = "order-late-1"
++    # частичное исполнение без цены
++    ok1 = ledger.record_status(oid, "PARTIALLYFILL", trade_id="t-1",
++                               figi="BBG000000000", ticker="TEST", side="BUY",
++                               requested_lots=5, executed_lots=2,
++                               avg_exec_price=None, commission=None, source="test")
++    assert ok1 is True
++    # терминальный CANCELLED-отчёт с 0.0-ценой: 0.0 не записывается
++    ok2 = ledger.record_status(oid, "CANCELLED", trade_id="t-1",
++                               figi="BBG000000000", ticker="TEST", side="BUY",
++                               requested_lots=5, executed_lots=2,
++                               avg_exec_price=0.0, commission=0.0, source="test")
++    assert ok2 is True
++    rec2 = ledger.latest(oid)
++    assert rec2["status"] == "CANCELLED"
++    assert rec2["avg_exec_price"] is None
++    assert rec2["commission"] == 0.0  # нулевая комиссия — достоверное значение
++    # позднее подтверждение полного исполнения с реальной ценой;
++    # комиссия в позднем отчёте отсутствует — достоверный 0.0 сохраняется
++    ok3 = ledger.record_status(oid, "FILL", trade_id="t-1",
++                               figi="BBG000000000", ticker="TEST", side="BUY",
++                               requested_lots=5, executed_lots=5,
++                               avg_exec_price=100.0, commission=None, source="late")
++    assert ok3 is True
++    rec3 = ledger.latest(oid)
++    assert rec3["status"] == "FILL"  # ложного UNCERTAIN нет
++    assert rec3["avg_exec_price"] == 100.0
++    assert rec3["commission"] == 0.0  # 0.0 не затёрт и не превращён в None
++    assert rec3["executed_lots"] == 5  # лоты не потеряны и не задвоены
++    last = _last_record(ledger.path)
++    assert last["avg_exec_price"] == 100.0
++
++
++# ---------------------------------------------------------------------
++# 14. Сохранение и повторная загрузка журнала
++# ---------------------------------------------------------------------
++
++def test_persistence_roundtrip_preserves_validation_semantics(tmp_path):
++    """(14) сохранённый журнал после повторной загрузки отражает ту же
++    семантику: отсутствие цены, достоверный 0.0-комиссии, обогащение."""
++    path = str(tmp_path / "order_ledger.jsonl")
++    ledger = OrderLedger(path)
++    oid1 = "order-pers-1"
++    ledger.record_status(oid1, "CANCELLED", trade_id="t-1",
++                         figi="BBG000000000", ticker="TEST", side="BUY",
++                         requested_lots=5, executed_lots=2,
++                         avg_exec_price=0.0, commission=0.0, source="test")
++    oid2 = "order-pers-2"
++    ledger.record_status(oid2, "FILL", trade_id="t-2",
++                         figi="BBG000000001", ticker="TEST2", side="SELL",
++                         requested_lots=3, executed_lots=3,
++                         avg_exec_price=50.0, commission=0.25, source="test")
++    # повторная загрузка
++    ledger2 = OrderLedger(path)
++    ledger2.load()
++    r1 = ledger2.latest(oid1)
++    assert r1["avg_exec_price"] is None
++    assert r1["commission"] == 0.0
++    assert r1["status"] == "CANCELLED"
++    r2 = ledger2.latest(oid2)
++    assert r2["avg_exec_price"] == 50.0
++    assert r2["commission"] == 0.25
++    # в самом файле тоже
++    recs = _read_status_records(path)
++    assert recs[0]["avg_exec_price"] is None
++    assert recs[0]["commission"] == 0.0
++    assert recs[1]["avg_exec_price"] == 50.0
++
++
++# ---------------------------------------------------------------------
++# 15. Поведение после перезапуска
++# ---------------------------------------------------------------------
++
++def test_behavior_after_restart(tmp_path):
++    """(15) после перезапуска (load): обогащение работает, противоречие
++    достоверных цен по-прежнему fail-closed, 0.0-комиссия живёт."""
++    path = str(tmp_path / "order_ledger.jsonl")
++    ledger = OrderLedger(path)
++    # заявка с неизвестной ценой и нулевой комиссией
++    oid_a = "order-restart-a"
++    ledger.record_status(oid_a, "CANCELLED", trade_id="t-a",
++                         figi="BBG000000000", ticker="TEST", side="BUY",
++                         requested_lots=5, executed_lots=2,
++                         avg_exec_price=0.0, commission=0.0, source="test")
++    # заявка с подтверждённой ценой 100.0 на терминальном статусе
++    oid_b = "order-restart-b"
++    ledger.record_status(oid_b, "FILL", trade_id="t-b",
++                         figi="BBG000000001", ticker="TEST2", side="BUY",
++                         requested_lots=5, executed_lots=5,
++                         avg_exec_price=100.0, commission=0.5, source="test")
++    ledger = None  # «перезапуск»
++
++    ledger2 = OrderLedger(path)
++    ledger2.load()
++    # 1) позднее подтверждение после перезапуска обогащает неизвестную цену
++    #    (комиссия в отчёте отсутствует — достоверный 0.0 сохраняется)
++    ok = ledger2.record_status(oid_a, "FILL", trade_id="t-a",
++                               figi="BBG000000000", ticker="TEST", side="BUY",
++                               requested_lots=5, executed_lots=5,
++                               avg_exec_price=100.0, commission=None, source="late")
++    assert ok is True
++    rec_a = ledger2.latest(oid_a)
++    assert rec_a["status"] == "FILL"
++    assert rec_a["avg_exec_price"] == 100.0
++    assert rec_a["commission"] == 0.0
++    # 2) настоящее противоречие двух достоверных цен — fail-closed
++    ok2 = ledger2.record_status(oid_b, "FILL", trade_id="t-b",
++                                figi="BBG000000001", ticker="TEST2", side="BUY",
++                                requested_lots=5, executed_lots=5,
++                                avg_exec_price=200.0, source="late")
++    assert ok2 is True
++    rec_b = ledger2.latest(oid_b)
++    assert rec_b["status"] == "UNCERTAIN"  # защита не ослаблена
++    assert rec_b["avg_exec_price"] == 100.0  # прежнее значение сохранено
++    # 3) повторный достоверный 0.0-комиссии не затирается и не превращается
++    #    в None; идентичное достоверное значение конфликтом не является
++    ok3 = ledger2.record_status(oid_a, "FILL", trade_id="t-a",
++                                figi="BBG000000000", ticker="TEST", side="BUY",
++                                requested_lots=5, executed_lots=5,
++                                commission=0.0, source="late2")
++    assert ok3 is True
++    assert ledger2.latest(oid_a)["commission"] == 0.0
++    assert ledger2.latest(oid_a)["status"] == "FILL"
++
++
++# ---------------------------------------------------------------------
++# Дополнительно: единообразие по всем входным путям (ТЗ §2 «все входные пути»)
++# ---------------------------------------------------------------------
++
++def test_record_sent_path_first_append_validated(tmp_path):
++    """Путь record_sent (post_response): первая запись с NaN-комиссией и
++    -Inf-ценой не записывает недостоверные значения."""
++    ledger = _mk(tmp_path)
++    ok = ledger.record_sent("order-sent-1", trade_id="t-1",
++                            figi="BBG000000000", ticker="TEST", side="BUY",
++                            requested_lots=5, executed_lots=2,
++                            avg_exec_price=float("-inf"),
++                            commission=float("nan"), source="post_response")
++    assert ok is True
++    rec = ledger.latest("order-sent-1")
++    assert rec["avg_exec_price"] is None
++    assert rec["commission"] is None
++    raw = open(ledger.path, "r", encoding="utf-8").read()
++    assert "NaN" not in raw and "Infinity" not in raw
++
++
++def test_record_observation_path_validated(tmp_path):
++    """Путь record_observation (кумулятивные наблюдения): невалидная цена
++    отклоняется, валидная — записывается."""
++    ledger = _mk(tmp_path)
++    oid = "order-obs-1"
++    ok0 = ledger.record_status(oid, "NEW", trade_id="t-1",
++                               figi="BBG000000000", ticker="TEST", side="BUY",
++                               requested_lots=5, executed_lots=0,
++                               source="test")
++    assert ok0 is True
++    ok1 = ledger.record_observation(oid, executed_lots=2, status="PARTIALLYFILL",
++                                    avg_exec_price=float("inf"), source="broker")
++    assert ok1 is True
++    assert ledger.latest(oid)["avg_exec_price"] is None
++    ok2 = ledger.record_observation(oid, executed_lots=4, status="PARTIALLYFILL",
++                                    avg_exec_price=99.5, source="broker")
++    assert ok2 is True
++    assert ledger.latest(oid)["avg_exec_price"] == 99.5
+--- /dev/null
++++ b/test_v4_safety_build.py
+@@ -0,0 +1,288 @@
++# test_v4_safety_build.py
++# V4 (ТЗ §7, §8): безопасное ядро laptop-сборки.
++#   * режим A (SAFE START / READ-ONLY) — по умолчанию, заявки заблокированы;
++#   * режим B — только маркер + env, LIVE запрещён всегда;
++#   * guard технически блокирует post_market_order/cancel_order на клиенте;
++#   * safe_start.py — read-only входная точка с fail-closed диагностикой;
++#   * проверки чистого окружения (импорт main без сети, py_compile,
++#     fail-closed конфигурации).
++# Все тесты локальные, mock/stub, без сетевых операций (ТЗ §0.14).
++
++import os
++import subprocess
++import sys
++import textwrap
++from pathlib import Path
++
++import pytest
++
++import build_safety
++from build_safety import (
++    MODE_SAFE_START,
++    MODE_SANDBOX_EXECUTION,
++    OrderSubmissionDisabledError,
++    assert_sandbox_only,
++    detect_mode,
++    install_order_guard,
++    marker_present,
++    mode_is_known,
++    orders_allowed,
++)
++
++# Корень кандидата (тесты могут выполняться с cwd=tmp_path — все файловые
++# и subprocess-проверки используют АБСОЛЮТНЫЙ путь сборки).
++CAND = Path(__file__).resolve().parent
++
++
++class _FakeClient:
++    """Минимальный двойник TinkoffClient для проверки guard'а."""
++
++    def __init__(self):
++        self.post_market_order = lambda *a, **k: "REAL_ORDER_SENT"
++        self.cancel_order = lambda *a, **k: "REAL_CANCEL_SENT"
++        self.uncertain_state = False
++
++
++@pytest.fixture(autouse=True)
++def _clean_mode_env(monkeypatch, tmp_path):
++    monkeypatch.delenv(build_safety.MODE_ENV_VAR, raising=False)
++    monkeypatch.chdir(tmp_path)
++    yield
++
++
++# ---------------------------------------------------------------------
++# Режимы (ТЗ §7.3): default SAFE_START; B — только маркер + env; fail-closed
++# ---------------------------------------------------------------------
++
++def test_default_mode_is_safe_start():
++    assert detect_mode() == MODE_SAFE_START
++    assert orders_allowed() is False
++    assert marker_present() is False
++
++
++def test_mode_b_requires_marker_and_env(monkeypatch):
++    # только env без маркера -> SAFE_START
++    monkeypatch.setenv(build_safety.MODE_ENV_VAR, MODE_SANDBOX_EXECUTION)
++    assert detect_mode() == MODE_SAFE_START
++    # только маркер без env -> SAFE_START
++    monkeypatch.delenv(build_safety.MODE_ENV_VAR)
++    Path(build_safety.MARKER_FILE).write_text("enabled_at_utc=now\n")
++    assert detect_mode() == MODE_SAFE_START
++    # оба условия -> SANDBOX_EXECUTION
++    monkeypatch.setenv(build_safety.MODE_ENV_VAR, MODE_SANDBOX_EXECUTION)
++    assert detect_mode() == MODE_SANDBOX_EXECUTION
++    assert orders_allowed() is True
++
++
++def test_unknown_env_value_fail_closed(monkeypatch):
++    monkeypatch.setenv(build_safety.MODE_ENV_VAR, "LIVE")
++    Path(build_safety.MARKER_FILE).write_text("x\n")
++    assert detect_mode() == MODE_SAFE_START  # опечатка не включает заявки
++    assert mode_is_known() is False
++    monkeypatch.setenv(build_safety.MODE_ENV_VAR, "sandbox_execution")  # регистронезависимо
++    assert detect_mode() == MODE_SANDBOX_EXECUTION
++    assert mode_is_known() is True
++
++
++def test_env_safe_start_value_is_known(monkeypatch):
++    monkeypatch.setenv(build_safety.MODE_ENV_VAR, MODE_SAFE_START)
++    assert detect_mode() == MODE_SAFE_START
++    assert mode_is_known() is True
++
++
++def test_live_is_hard_blocked_at_client_and_config_levels():
++    # уровень 1: assert_sandbox_only
++    with pytest.raises(RuntimeError, match="LIVE запрещён"):
++        assert_sandbox_only(False)
++    assert_sandbox_only(True)  # не поднимает
++    # уровень 2/3: TinkoffClient и config.validate() (см. test_safety.py/
++    # test_trading_flag.py и production-код; здесь — контракт build_safety)
++    from tinkoff_client import SandboxRequiredError, TinkoffClient
++    with pytest.raises(SandboxRequiredError):
++        TinkoffClient("token", use_sandbox=False)
++
++
++# ---------------------------------------------------------------------
++# Guard заявок (ТЗ §7.3): блокировка отправки/отмены на экземпляре
++# ---------------------------------------------------------------------
++
++def test_guard_blocks_post_and_cancel_in_safe_start():
++    client = _FakeClient()
++    installed = install_order_guard(client, MODE_SAFE_START)
++    assert installed is True
++    with pytest.raises(OrderSubmissionDisabledError):
++        client.post_market_order("FIGI", 1, None, "oid")
++    with pytest.raises(OrderSubmissionDisabledError):
++        client.cancel_order("oid")
++    # исключение поднимается до сети: метод заменён функцией, coroutine
++    # не создаётся и брокер не получает вызова
++
++
++def test_guard_not_installed_in_mode_b():
++    Path(build_safety.MARKER_FILE).write_text("x\n")
++    monkeypatch_setenv = os.environ.__setitem__
++    old = os.environ.get(build_safety.MODE_ENV_VAR)
++    os.environ[build_safety.MODE_ENV_VAR] = MODE_SANDBOX_EXECUTION
++    try:
++        client = _FakeClient()
++        installed = install_order_guard(client)
++        assert installed is False
++        assert client.post_market_order("FIGI", 1, None, "oid") == "REAL_ORDER_SENT"
++        assert client.cancel_order("oid") == "REAL_CANCEL_SENT"
++    finally:
++        if old is None:
++            os.environ.pop(build_safety.MODE_ENV_VAR, None)
++        else:
++            monkeypatch_setenv(build_safety.MODE_ENV_VAR, old)
++
++
++def test_guard_is_idempotent():
++    client = _FakeClient()
++    assert install_order_guard(client, MODE_SAFE_START) is True
++    assert install_order_guard(client, MODE_SAFE_START) is False
++    with pytest.raises(OrderSubmissionDisabledError):
++        client.post_market_order("FIGI", 1, None, "oid")
++
++
++def test_guard_report_no_secrets():
++    client = _FakeClient()
++    install_order_guard(client, MODE_SAFE_START)
++    rep = build_safety.guard_report(client)
++    assert rep["guard_installed"] is True
++    assert rep["mode"] == MODE_SAFE_START
++    assert rep["orders_allowed"] is False
++    assert set(rep["guarded_methods"]) == {"post_market_order", "cancel_order"}
++
++
++def test_main_source_installs_guard_and_safe_start_has_no_trading_loop():
++    """Контракт сборки: guard подключён в main(); safe_start не содержит
++    торгового цикла/скринера/reconcile (ТЗ §8.14 — «нет скрытого запуска
++    торгового цикла»)."""
++    main_src = (CAND / "main.py").read_text(encoding="utf-8")
++    assert "build_safety.install_order_guard(client)" in main_src
++    assert "build_safety.assert_sandbox_only(config.USE_SANDBOX)" in main_src
++    safe_src = (CAND / "safe_start.py").read_text(encoding="utf-8")
++    # запрет на ВЫЗОВЫ (в комментариях/докстрингах упоминания допустимы)
++    assert "trading_cycle(" not in safe_src
++    assert "Screener(" not in safe_src
++    assert "reconcile(" not in safe_src
++    assert "startup_recovery(" not in safe_src
++    assert "process_closing(" not in safe_src
++    assert "promote_recovery_positions(" not in safe_src
++    assert "poll_open_orders(" not in safe_src
++
++
++# ---------------------------------------------------------------------
++# safe_start.py (ТЗ §7.3 Режим A, §7.5 диагностика)
++# ---------------------------------------------------------------------
++
++@pytest.fixture
++def _configured(monkeypatch):
++    monkeypatch.setattr("config.TINKOFF_API_TOKEN", "test-token-not-real")
++    monkeypatch.setattr("config.TINKOFF_READONLY_TOKEN", "test-ro")
++    monkeypatch.setattr("config.TELEGRAM_BOT_TOKEN", "test-tg")
++    monkeypatch.setattr("config.TELEGRAM_CHAT_ID", "123")
++    monkeypatch.setattr("config.TELEGRAM_ALLOWED_USER_ID", "1")
++    monkeypatch.setattr(sys, "argv", ["safe_start.py", "--no-api"])
++    yield
++
++
++def test_safe_start_passes_in_clean_dir(_configured, capsys):
++    import safe_start
++    rc = safe_start.main()
++    out = capsys.readouterr().out
++    assert rc == 0
++    assert "SAFE START / READ-ONLY" in out
++    assert "BROKER ORDER SUBMISSION DISABLED BY DEFAULT" in out
++    assert "само-тест блокировки" in out  # заявка отклонена guard'ом
++    assert "STRATEGY LOGIC: UNCHANGED" in out
++
++
++def test_safe_start_fail_closed_without_token(monkeypatch, _configured, capsys):
++    monkeypatch.setattr("config.TINKOFF_API_TOKEN", None)
++    import safe_start
++    rc = safe_start.main()
++    out = capsys.readouterr().out
++    assert rc == 2
++    assert "БЕЗОПАСНЫЙ ОТКАЗ" in out
++    assert "TINKOFF_API_TOKEN" in out
++
++
++def test_safe_start_reports_mode_b_as_warning(_configured, monkeypatch, capsys):
++    Path(build_safety.MARKER_FILE).write_text("x\n")
++    monkeypatch.setenv(build_safety.MODE_ENV_VAR, MODE_SANDBOX_EXECUTION)
++    import safe_start
++    rc = safe_start.main()
++    out = capsys.readouterr().out
++    assert rc == 0
++    assert "Режим B активен" in out
++
++
++def test_safe_start_does_not_print_secrets(_configured, monkeypatch, capsys):
++    monkeypatch.setenv("TINKOFF_API_TOKEN", "super-secret-token-value-123")
++    import safe_start
++    safe_start.main()
++    out = capsys.readouterr().out
++    assert "super-secret-token-value-123" not in out
++    assert "задана (значение не выводится)" in out
++
++
++# ---------------------------------------------------------------------
++# Чистое окружение (ТЗ §8): компиляция, импорт, fail-closed конфигурация
++# ---------------------------------------------------------------------
++
++PRODUCTION_FILES = [
++    "main.py", "config.py", "logger.py", "execution.py", "order_ledger.py",
++    "strategy.py", "risk_manager.py", "screener.py", "telegram_bot.py",
++    "tinkoff_client.py", "build_safety.py", "safe_start.py",
++    "enable_sandbox_execution.py",
++]
++
++REQUIRED_CANDIDATE_FILES = PRODUCTION_FILES + [
++    "conftest.py", "requirements.txt", "test_v4_order_ledger_first_append.py",
++    "test_v4_safety_build.py",
++]
++
++
++def test_all_production_files_compile():
++    for name in PRODUCTION_FILES:
++        assert (CAND / name).is_file(), f"файл отсутствует: {name}"
++        rc = subprocess.run([sys.executable, "-m", "py_compile", name],
++                            capture_output=True, text=True, cwd=CAND)
++        assert rc.returncode == 0, f"{name} не компилируется: {rc.stderr}"
++
++
++def test_required_candidate_files_present():
++    for name in REQUIRED_CANDIDATE_FILES:
++        assert (CAND / name).is_file(), f"обязательный файл отсутствует: {name}"
++
++
++def test_main_imports_cleanly_with_stubs_subprocess():
++    """Импорт main.py в чистом subprocess с заглушками (нет циклов/сбоев,
++    нет сетевых вызовов — импорт не подключается к брокеру)."""
++    code = textwrap.dedent("""
++        import sys
++        sys.path.insert(0, ".")
++        from tests.conftest import _install_stubs
++        _install_stubs()
++        import main
++        print("MAIN_IMPORT_OK")
++    """)
++    rc = subprocess.run([sys.executable, "-c", code], capture_output=True,
++                        text=True, timeout=120, cwd=CAND)
++    assert rc.returncode == 0, rc.stderr[-2000:]
++    assert "MAIN_IMPORT_OK" in rc.stdout
++
++
++def test_config_validate_fails_closed_without_env_subprocess(tmp_path):
++    """Чистая среда без ключей: config.validate() обязан отказать."""
++    env = {k: v for k, v in os.environ.items()
++           if k not in ("TINKOFF_API_TOKEN", "TINKOFF_READONLY_TOKEN",
++                        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
++                        "TELEGRAM_ALLOWED_USER_ID")}
++    rc = subprocess.run([sys.executable, "-c",
++                         "import config; config.validate()"],
++                        capture_output=True, text=True, env=env, timeout=60,
++                        cwd=CAND)
++    assert rc.returncode != 0
++    assert "Не заданы" in rc.stderr
+--- /dev/null
++++ b/test_v4_integration_integrity.py
+@@ -0,0 +1,137 @@
++# test_v4_integration_integrity.py
++# V4 (ТЗ §4): точечные интеграционные тесты групп, у которых ранее не было
++# ПРЯМОГО покрытия по имени:
++#   * группа 22 «Duplicate position prevention» — блокировка нового входа,
++#     когда позиция уже есть (у брокера / в локальном monitor);
++#   * группа 24 «Stale close order protection» — запрет новой SELL, пока
++#     предыдущая заявка закрытия не разрешена (close_order_request_id /
++#     нетерминальный журнал close_orders / незавершённая SELL в реестре).
++# Остальные группы §4 покрыты существующими наборами (см. отчёт
++# AUDIT_INTEGRITY.md). Тесты локальные, mock/stub, без сети.
++
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, MagicMock
++
++import pytest
++
++import main
++from execution import ExecutionMonitor, PositionState
++from order_ledger import OrderLedger
++from risk_manager import RiskManager
++
++
++def _setup_entry_env(monkeypatch, tmp_path, fake, monitor, *, trading_on=True):
++    """Общая обвязка trading_cycle для проверки блокировки входов."""
++    rm = MagicMock()
++    sm = MagicMock()
++    sm.get_signal = MagicMock(return_value=("BUY", "MA(9/21) ↑"))
++    monkeypatch.setattr(main, "top_instruments", [{"figi": "F1", "ticker": "MVID"}])
++    monkeypatch.setattr(main, "reconcile_done", True)
++    monkeypatch.setattr(main, "state_save_failed", False)
++    monkeypatch.setattr(main, "is_trading_enabled", MagicMock(return_value=trading_on))
++    monkeypatch.setattr(main, "_save_state", MagicMock(return_value=True))
++    monkeypatch.setattr(main, "reconcile", AsyncMock(return_value=None))
++    ledger = OrderLedger(str(tmp_path / "order_ledger.jsonl"))
++    monkeypatch.setattr(main, "ledger_ref", ledger)
++    monitor.check_all = AsyncMock(return_value=[])
++    return rm, sm
++
++
++@pytest.mark.asyncio
++async def test_trading_cycle_skips_entry_when_broker_position_exists(monkeypatch, tmp_path):
++    """Группа 22: у брокера УЖЕ есть позиция по FIGI -> новый BUY НЕ отправляется
++    (главный цикл, ветка «позиция уже открыта/в неопределённости»)."""
++    from tinkoff_client import PositionData
++    from decimal import Decimal
++
++    fake = MagicMock()
++    fake.get_last_prices = AsyncMock(return_value={"F1": 54.25})
++    fake.get_positions = AsyncMock(return_value={
++        "F1": PositionData(lots=1, direction="LONG", raw_shares=Decimal(1))})
++    fake.post_market_order = AsyncMock()
++    fake.is_uncertain = MagicMock(return_value=False)
++
++    monitor = ExecutionMonitor(fake)
++    rm, sm = _setup_entry_env(monkeypatch, tmp_path, fake, monitor)
++
++    await main.trading_cycle(fake, rm, sm, monitor)
++    assert fake.post_market_order.await_count == 0, \
++        "Новый BUY отправлен при существующей позиции у брокера"
++    assert monitor.has_active_position("F1") is False  # локальная позиция не создана
++
++
++@pytest.mark.asyncio
++async def test_trading_cycle_skips_entry_when_monitor_has_active_position(monkeypatch, tmp_path):
++    """Группа 22: активная позиция в ЛОКАЛЬНОМ monitor (позиции брокера нет в
++    снимке) -> новый BUY НЕ отправляется до разрешения (защита от дубля)."""
++    fake = MagicMock()
++    fake.get_last_prices = AsyncMock(return_value={"F1": 54.25})
++    fake.get_positions = AsyncMock(return_value={})
++    fake.post_market_order = AsyncMock()
++    fake.is_uncertain = MagicMock(return_value=False)
++
++    monitor = ExecutionMonitor(fake)
++    monitor.register(figi="F1", ticker="MVID", direction="BUY",
++                     entry_price=54.0, quantity=1, sl_price=53.0, tp_price=56.0,
++                     lot_size=1, trade_id="tid-F1", entry_requested_lots=1)
++    rm, sm = _setup_entry_env(monkeypatch, tmp_path, fake, monitor)
++
++    await main.trading_cycle(fake, rm, sm, monitor)
++    assert fake.post_market_order.await_count == 0, \
++        "Новый BUY отправлен при активной локальной позиции"
++    assert monitor.has_active_position("F1") is True
++
++
++# ---------------------------------------------------------------------
++# Группа 24: stale close order protection (_sell_block_reason)
++# ---------------------------------------------------------------------
++
++def _pos(**overrides):
++    base = dict(direction="BUY", figi="F1", close_order_request_id=None,
++                close_order_id=None, close_orders={})
++    base.update(overrides)
++    return SimpleNamespace(**base)
++
++
++def test_sell_block_reason_blocks_unresolved_close_request_id():
++    pos = _pos(close_order_request_id="req-123")
++    reason = main._sell_block_reason(pos, None)
++    assert reason is not None
++    assert "close_order_request_id" in reason
++
++
++def test_sell_block_reason_blocks_unresolved_close_order_id():
++    pos = _pos(close_order_id="oid-1")
++    assert main._sell_block_reason(pos, None) is not None
++
++
++def test_sell_block_reason_blocks_nonterminal_close_journal():
++    pos = _pos(close_orders={"o1": {"status": "NEW", "side": "SELL"}})
++    reason = main._sell_block_reason(pos, None)
++    assert reason is not None and "нетерминальном" in reason
++
++
++def test_sell_block_reason_allows_terminal_close_journal():
++    """Терминальные статусы журнала (включая сырые числовые коды) НЕ блокируют
++    новую SELL — единое множество с execution._TERMINAL_SELL_STATUSES (OOS-4)."""
++    for status in ("FILL", "CANCELLED", "REJECTED", "EXPIRED", "1", "2", "3"):
++        pos = _pos(close_orders={"o1": {"status": status, "side": "SELL"}})
++        assert main._sell_block_reason(pos, None) is None, f"статус {status} заблокировал SELL"
++
++
++def test_sell_block_reason_blocks_open_sell_in_ledger(tmp_path):
++    """Незавершённая SELL-запись реестра по FIGI (INTENT без исхода) блокирует
++    повторную SELL — защита потерянного ответа после краха."""
++    ledger = OrderLedger(str(tmp_path / "order_ledger.jsonl"))
++    ok = ledger.record_intent("sell-intent-1", trade_id="t-1", figi="F1",
++                              ticker="T", side="SELL", requested_lots=1)
++    assert ok is True
++    pos = _pos()
++    reason = main._sell_block_reason(pos, ledger)
++    assert reason is not None and "реестр" in reason
++
++
++def test_sell_block_reason_clean_position_returns_none(tmp_path):
++    ledger = OrderLedger(str(tmp_path / "order_ledger.jsonl"))
++    ledger.load()
++    assert main._sell_block_reason(_pos(), ledger) is None
